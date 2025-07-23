@@ -3,29 +3,37 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware para parsear JSON
-app.use(express.json());
-
-// Middleware para permitir CORS
+// Lista blanca de dominios permitidos
 const allowedOrigins = [
   'https://naluinsights.lovable.app',
   'https://preview-naluinsights.lovable.app',
-  'https://nalua.com',
+  'https://nalua.com'
 ];
 
+// Middleware de CORS (sin errores)
 app.use(cors({
   origin: function (origin, callback) {
+    // Permitir requests sin origen (por ejemplo desde curl o Postman)
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
       callback(new Error('No permitido por CORS'));
     }
   },
+  credentials: true,
   methods: 'GET,POST,OPTIONS',
-  allowedHeaders: 'Content-Type,Authorization',
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Ruta POST para correr simulaciones
+// Middleware para parsear JSON
+app.use(express.json());
+
+// Ruta de prueba simple (opcional)
+app.get('/', (req, res) => {
+  res.send('API corriendo correctamente');
+});
+
+// Ruta principal: POST para correr simulaciones
 app.post('/api/simulations/run', (req, res) => {
   const { type, audience, questions } = req.body;
 
@@ -46,6 +54,7 @@ app.post('/api/simulations/run', (req, res) => {
   res.json(simulatedResults);
 });
 
+// Arranca el servidor
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en el puerto ${PORT}`);
 });
