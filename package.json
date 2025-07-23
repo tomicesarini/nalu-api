@@ -18,6 +18,7 @@
   "homepage": "https://github.com/tomicesarini/nalu-api#readme",
   "description": "",
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^5.1.0"
   }
 }
