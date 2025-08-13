@@ -163,7 +163,9 @@ app.post('/api/simulations/run', async (req, res) => {
     return res.status(500).json({ success: false, error: 'Error interno al simular.' });
   }
 });
-
+app.get('/health', (req, res) => {
+  res.json({ ok: true, status: 'API is running' });
+});
 // --- Start ---
 app.listen(PORT, () => {
   console.log(`🚀 API Nalu corriendo en puerto ${PORT}`);
