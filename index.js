@@ -27,7 +27,15 @@ app.use((req, res, next) => {
 
 // Middleware para parsear JSON
 app.use(express.json());
+// Rutas de verificación
+app.get('/', (req, res) => {
+  res.json({ ok: true, message: 'API funcionando 🚀', time: new 
+Date().toISOString() });
+});
 
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
 // Ruta POST simulación
 app.post('/api/simulations/run', (req, res) => {
   const { type, audience, questions } = req.body;
