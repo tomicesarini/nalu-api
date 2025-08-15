@@ -128,28 +128,33 @@ async function runAssistant(userContent, timeoutMs = 60000) {
   // 1) Crear thread
   const thread = await client.beta.threads.create();
 
-  // 2) Mandar mensaje del usuario (nuestro JSON compacto)
-  await client.beta.threads.messages.create({
-    thread_id: thread.id,
+  // Guardas defensivas por si algo raro pasa
+  if (!thread?.id || typeof thread.id !== 'string') {
+    throw new Error('No se pudo crear el thread correctamente.');
+  }
+
+  // 2) Mandar mensaje de usuario (JSON compacto)
+  await client.beta.threads.messages.create(thread.id, {
     role: 'user',
     content: JSON.stringify(userContent),
   });
 
   // 3) Crear run con tu Assistant
-  const run = await client.beta.threads.runs.create({
-    thread_id: thread.id,
-    assistant_id: ASSISTANT_ID
+  const run = await client.beta.threads.runs.create(thread.id, {
+    assistant_id: ASSISTANT_ID,
   });
 
   // 4) Poll hasta completar o timeout
   const started = Date.now();
   while (true) {
-    const r = await client.beta.threads.runs.retrieve({
-      thread_id: thread.id,
-      run_id: run.id
-    });
+    const r = await client.beta.threads.runs.retrieve(thread.id, run.id);
     if (r.status === 'completed') break;
-    if (['requires_action', 'failed', 'cancelled', 'expired'].includes(r.status)) {
+    if (
+      r.status === 'requires_action' ||
+      r.status === 'failed' ||
+      r.status === 'cancelled' ||
+      r.status === 'expired'
+    ) {
       throw new Error(`Run status: ${r.status}`);
     }
     if (Date.now() - started > timeoutMs) {
@@ -158,32 +163,28 @@ async function runAssistant(userContent, timeoutMs = 60000) {
     await new Promise(res => setTimeout(res, 800));
   }
 
-  // 5) Leer mensajes del thread (desc, últimos 10)
-  const messages = await client.beta.threads.messages.list({
-    thread_id: thread.id,
-    order: 'desc',
-    limit: 10
-  });
-
-  // 6) Extraer texto y parsear JSON
+  // 5) Leer últimos mensajes del thread
+  const messages = await client.beta.threads.messages.list(thread.id, { order: 'desc', limit: 10 });
   let text = '';
   for (const m of messages.data) {
-    for (const p of (m.content || [])) {
-      if (p.type === 'text' && p.text?.value) { text = p.text.value; break; }
+    for (const part of (m.content || [])) {
+      if (part.type === 'text' && part.text?.value) {
+        text = part.text.value;
+        break;
+      }
     }
     if (text) break;
   }
   if (!text) throw new Error('Assistant no devolvió texto');
 
-  let parsed;
+  // 6) Parsear JSON
   try {
-    parsed = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
     const match = text.match(/\{[\s\S]*\}$/);
-    if (match) parsed = JSON.parse(match[0]);
-    else throw new Error('Respuesta del Assistant no es JSON válido');
+    if (match) return JSON.parse(match[0]);
+    throw new Error('Respuesta del Assistant no es JSON válido');
   }
-  return parsed;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
