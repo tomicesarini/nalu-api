@@ -141,7 +141,7 @@ async function runAssistant(userContent, timeoutMs = 45000) {
   const started = Date.now();
   while (true) {
     console.log('[assistant] retrieving run:', { threadId: thread.id, runId: run.id });
-    const r = await client.beta.threads.runs.retrieve(thread.id, run.id); // <--- orden correcto
+    const r = await client.beta.threads.runs.retrieve(run.id, thread.id); // <--- orden correcto
     if (r.status === 'completed') break;
     if (['requires_action', 'failed', 'cancelled', 'expired'].includes(r.status)) {
       throw new Error(`Run status: ${r.status}`);
