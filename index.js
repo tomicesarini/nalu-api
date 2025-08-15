@@ -1,4 +1,4 @@
-// index.js — Nalu API (Assistants: fix threadId/runId + logs)
+// index.js — Nalu API (OpenAI Assistants)
 
 const express = require('express');
 const cors = require('cors');
@@ -7,7 +7,9 @@ const OpenAI = require('openai');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ───────── CORS ───────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// CORS
+// ─────────────────────────────────────────────────────────────────────────────
 const allowedOrigins = new Set([
   'https://naluinsights.lovable.app',
   'https://preview-naluinsights.lovable.app',
@@ -27,20 +29,28 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ───────── JSON + health ───────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON + health
+// ─────────────────────────────────────────────────────────────────────────────
 app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({ ok: true, status: 'API is running', ts: new Date().toISOString() });
 });
 
-/* ───────── OpenAI ───────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenAI
+// ─────────────────────────────────────────────────────────────────────────────
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const ASSISTANT_ID = process.env.ASSISTANT_ID || 'asst_be0LI9dHJ8Ub8HPjDqDOqPCr';
 
-/* ───────── Utils ───────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// Utils
+// ─────────────────────────────────────────────────────────────────────────────
 const SINGLE_CHOICE_TYPES = new Set([
-  'multiple-choice','single-choice','single','yes-no','yesno','boolean','scale','rating','likert'
+  'multiple-choice', 'single-choice', 'single',
+  'yes-no', 'yesno', 'boolean', 'scale', 'rating', 'likert'
 ]);
+
 const clampInt = (n, min, max) => {
   n = Math.round(Number(n) || 0);
   if (n < min) n = min;
@@ -57,12 +67,18 @@ function normalizePercentagesTo100(answers) {
   }));
   let total = sum(clamped.map(a => a.percentage));
   if (total === 100) return clamped;
-  if (total <= 0) return clamped.map((a,i)=>({...a, percentage:i===0?100:0}));
-  let scaled = clamped.map(a => ({ ...a, percentage: Math.round((a.percentage*100)/total) }));
+  if (total <= 0) {
+    return clamped.map((a, i) => ({ ...a, percentage: i === 0 ? 100 : 0 }));
+  }
+  let scaled = clamped.map(a => ({
+    ...a,
+    percentage: Math.round((a.percentage * 100) / total)
+  }));
   const diff = 100 - sum(scaled.map(a => a.percentage));
   if (scaled[0]) scaled[0].percentage += diff;
   return scaled;
 }
+
 function isSingleChoice(q) {
   const t = (q?.type || '').toLowerCase();
   if (SINGLE_CHOICE_TYPES.has(t)) return true;
@@ -70,16 +86,20 @@ function isSingleChoice(q) {
   return false;
 }
 
-/* ───────── Normalización de ENTRADA ───────── */
 function normalizePayload(body) {
   const type = (body?.type || '').toString().toLowerCase();
   const questions = Array.isArray(body?.questions) ? body.questions : [];
+
   const normQuestions = questions.map(q => {
-    const base = { question: (q?.question || '').toString(), required: Boolean(q?.required) };
+    const base = {
+      question: (q?.question || '').toString(),
+      required: Boolean(q?.required),
+    };
     const qType = (q?.type || '').toString().toLowerCase();
-    if ((qType==='yes-no'||qType==='yesno'||qType==='boolean') && !Array.isArray(q?.options)) {
-      base.type = 'yes-no'; base.options = ['Sí','No'];
-    } else if (Array.isArray(q?.options) && q.options.length>0) {
+    if ((qType === 'yes-no' || qType === 'yesno' || qType === 'boolean') && !Array.isArray(q?.options)) {
+      base.type = 'yes-no';
+      base.options = ['Sí', 'No'];
+    } else if (Array.isArray(q?.options) && q.options.length > 0) {
       base.options = q.options.map(o => (o ?? '').toString().trim()).filter(Boolean);
       if (q?.type) base.type = qType;
     } else {
@@ -87,6 +107,7 @@ function normalizePayload(body) {
     }
     return base;
   });
+
   return {
     type: type === 'entrevista' ? 'entrevista' : 'encuesta',
     audience: body?.audience || {},
@@ -96,75 +117,79 @@ function normalizePayload(body) {
   };
 }
 
-/* ───────── Assistant (Threads + Runs) — FIX ───────── */
-async function runAssistant(userContent, timeoutMs = 60000) {
-  // 1) Thread
-  const thread = await client.beta.threads.create({});
-  const threadId = thread?.id;
-  console.log('[assistant] threadId:', threadId);
-  if (!threadId || !threadId.startsWith('thread_')) {
-    throw new Error(`threadId inválido: ${threadId}`);
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+// Assistant
+// ─────────────────────────────────────────────────────────────────────────────
+async function runAssistant(userContent, timeoutMs = 45000) {
+  // Crear thread
+  const thread = await client.beta.threads.create();
+  console.log('[assistant] threadId:', thread.id);
 
-  // 2) Mensaje
-  await client.beta.threads.messages.create(threadId, {
+  // Mandar mensaje
+  await client.beta.threads.messages.create(thread.id, {
     role: 'user',
     content: JSON.stringify(userContent),
   });
 
-  // 3) Run
-  const run = await client.beta.threads.runs.create(threadId, {
+  // Crear run
+  const run = await client.beta.threads.runs.create(thread.id, {
     assistant_id: ASSISTANT_ID,
-    instructions: 'Devuelve SOLO JSON válido con el esquema acordado.',
   });
-  const runId = run?.id;
-  console.log('[assistant] runId:', runId);
-  if (!runId || !runId.startsWith('run_')) {
-    throw new Error(`runId inválido: ${runId}`);
-  }
+  console.log('[assistant] runId:', run.id);
 
-  // 4) Poll
+  // Polling hasta completar
   const started = Date.now();
-  const wait = (ms) => new Promise(r => setTimeout(r, ms));
   while (true) {
-    const r = await client.beta.threads.runs.retrieve(threadId, runId);
+    console.log('[assistant] retrieving run:', { threadId: thread.id, runId: run.id });
+    const r = await client.beta.threads.runs.retrieve(thread.id, run.id); // <--- orden correcto
     if (r.status === 'completed') break;
-    if (['failed','expired','cancelled'].includes(r.status)) {
+    if (['requires_action', 'failed', 'cancelled', 'expired'].includes(r.status)) {
       throw new Error(`Run status: ${r.status}`);
     }
     if (Date.now() - started > timeoutMs) throw new Error('Run timeout');
-    await wait(800);
+    await new Promise(res => setTimeout(res, 800));
   }
 
-  // 5) Mensaje final del assistant
-  const msgs = await client.beta.threads.messages.list(threadId, { order:'desc', limit:10 });
+  // Leer mensajes
+  const messages = await client.beta.threads.messages.list(thread.id, { order: 'desc', limit: 10 });
   let text = '';
-  for (const m of msgs.data) {
-    if (m.role !== 'assistant') continue;
-    for (const part of (m.content || [])) {
-      if (part.type === 'text' && part.text?.value) { text = part.text.value; break; }
+  for (const m of messages.data) {
+    const parts = m.content || [];
+    for (const p of parts) {
+      if (p.type === 'text' && p.text?.value) {
+        text = p.text.value;
+        break;
+      }
     }
     if (text) break;
   }
   if (!text) throw new Error('Assistant no devolvió texto');
 
-  try { return JSON.parse(text); }
-  catch {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
     const match = text.match(/\{[\s\S]*\}$/);
-    if (match) return JSON.parse(match[0]);
-    throw new Error('Respuesta del Assistant no es JSON válido');
+    if (match) {
+      parsed = JSON.parse(match[0]);
+    } else {
+      throw new Error('Respuesta del Assistant no es JSON válido');
+    }
   }
+  return parsed;
 }
 
-/* ───────── Ruta principal ───────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// Ruta principal
+// ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/simulations/run', async (req, res) => {
   try {
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ success:false, error:'OPENAI_API_KEY no configurada.' });
+      return res.status(500).json({ success: false, error: 'OPENAI_API_KEY no configurada en el servidor.' });
     }
     const input = normalizePayload(req.body);
     if (!input.questions || input.questions.length === 0) {
-      return res.status(400).json({ success:false, error:'Faltan preguntas.' });
+      return res.status(400).json({ success: false, error: 'Faltan preguntas.' });
     }
 
     const userContent = {
@@ -172,20 +197,26 @@ app.post('/api/simulations/run', async (req, res) => {
       responsesToSimulate: input.responsesToSimulate,
       audience: input.audience,
       psychographics: input.psychographics,
-      questions: input.questions,
+      questions: input.questions
     };
 
-    const out = await runAssistant(userContent);
-    if (!out || !Array.isArray(out.results)) {
-      return res.status(502).json({ success:false, error:'Respuesta inválida del Assistant (sin results).' });
+    const assistantRaw = await runAssistant(userContent);
+
+    if (!assistantRaw || !Array.isArray(assistantRaw.results)) {
+      return res.status(502).json({ success: false, error: 'Respuesta inválida del Assistant (sin results).' });
     }
 
-    const normalizedResults = out.results.map((r, i) => {
+    const normalizedResults = assistantRaw.results.map((r, i) => {
       const q = input.questions[i] || {};
       let answers = Array.isArray(r.answers)
-        ? r.answers.map(a => ({ text: (a?.text ?? '').toString(), percentage: clampInt(a?.percentage ?? 0, 0, 100) }))
+        ? r.answers.map(a => ({
+            text: (a?.text ?? '').toString(),
+            percentage: clampInt(a?.percentage ?? 0, 0, 100),
+          }))
         : [];
-      if (isSingleChoice(q)) answers = normalizePercentagesTo100(answers);
+      if (isSingleChoice(q)) {
+        answers = normalizePercentagesTo100(answers);
+      }
       return {
         question: r.question || q.question || `Pregunta ${i + 1}`,
         answers,
@@ -197,18 +228,17 @@ app.post('/api/simulations/run', async (req, res) => {
       success: true,
       source: 'assistant',
       simulationId: `sim_${Date.now()}`,
-      status: out.status || 'completed',
+      status: assistantRaw.status || 'completed',
       estimatedTime: 'unos segundos',
-      results: normalizedResults,
+      results: normalizedResults
     });
 
   } catch (err) {
     console.error('Error /api/simulations/run:', err);
-    return res.status(500).json({ success:false, error:'Error interno al simular con OpenAI Assistant.' });
+    return res.status(500).json({ success: false, error: 'Error interno al simular con OpenAI Assistant.' });
   }
 });
 
-/* ───────── Start ───────── */
 app.listen(PORT, () => {
   console.log(`🚀 API Nalu corriendo en puerto ${PORT}`);
 });
