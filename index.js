@@ -1,4 +1,4 @@
-// index.js — Nalu API (OpenAI Assistants, sólido)
+// index.js — Nalu API (OpenAI Assistants, fix threadId/runId)
 
 const express = require('express');
 const cors = require('cors');
@@ -7,9 +7,9 @@ const OpenAI = require('openai');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ──────────────────────────────────────────────────────────────────────────
-   CORS (tus dominios + subdominios lovable)
-   ────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   CORS
+   ───────────────────────────────────────────────────────────── */
 const allowedOrigins = new Set([
   'https://naluinsights.lovable.app',
   'https://preview-naluinsights.lovable.app',
@@ -29,24 +29,23 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ──────────────────────────────────────────────────────────────────────────
-   JSON + health
-   ────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   JSON + Health
+   ───────────────────────────────────────────────────────────── */
 app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({ ok: true, status: 'API is running', ts: new Date().toISOString() });
 });
 
-/* ──────────────────────────────────────────────────────────────────────────
-   OpenAI (usa OPENAI_API_KEY en Render)
-   ────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   OpenAI
+   ───────────────────────────────────────────────────────────── */
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-// Usa ASSISTANT_ID del entorno si existe; si no, tu ID fijo:
 const ASSISTANT_ID = process.env.ASSISTANT_ID || 'asst_be0LI9dHJ8Ub8HPjDqDOqPCr';
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Utils de normalización/validación para la salida
-   ────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   Utilidades de normalización
+   ───────────────────────────────────────────────────────────── */
 const SINGLE_CHOICE_TYPES = new Set([
   'multiple-choice', 'single-choice', 'single',
   'yes-no', 'yesno', 'boolean', 'scale', 'rating', 'likert'
@@ -87,9 +86,9 @@ function isSingleChoice(q) {
   return false;
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Normalización de payload de ENTRADA (lo que nos manda el front)
-   ────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   Normalización de payload de ENTRADA
+   ───────────────────────────────────────────────────────────── */
 function normalizePayload(body) {
   const type = (body?.type || '').toString().toLowerCase();
   const questions = Array.isArray(body?.questions) ? body.questions : [];
@@ -121,19 +120,16 @@ function normalizePayload(body) {
   };
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Llamado al Assistant (Threads + Runs) y parseo de su respuesta JSON
-   ────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   Llamado al Assistant (Threads + Runs) — FIX threadId/runId
+   ───────────────────────────────────────────────────────────── */
 async function runAssistant(userContent, timeoutMs = 60000) {
   // 1) Crear thread
-  const thread = await client.beta.threads.create();
+  const thread = await client.beta.threads.create({});
   const threadId = thread?.id;
+  if (!threadId) throw new Error('No se pudo crear thread (id vacío)');
 
-  if (!threadId || typeof threadId !== 'string') {
-    throw new Error(`No se pudo obtener thread.id, valor: ${threadId}`);
-  }
-
-  // 2) Mandar mensaje
+  // 2) Mensaje de usuario
   await client.beta.threads.messages.create(threadId, {
     role: 'user',
     content: JSON.stringify(userContent),
@@ -142,31 +138,33 @@ async function runAssistant(userContent, timeoutMs = 60000) {
   // 3) Crear run
   const run = await client.beta.threads.runs.create(threadId, {
     assistant_id: ASSISTANT_ID,
+    // Si querés reforzar JSON, podés agregar una instrucción corta:
+    instructions: 'Devuelve SOLO JSON válido con el esquema acordado.',
   });
-
   const runId = run?.id;
-  if (!runId || typeof runId !== 'string') {
-    throw new Error(`No se pudo obtener run.id, valor: ${runId}`);
-  }
+  if (!runId) throw new Error('No se pudo crear run (id vacío)');
 
   // 4) Poll hasta completar o timeout
   const started = Date.now();
+  // peq. backoff
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
   while (true) {
     const r = await client.beta.threads.runs.retrieve(threadId, runId);
     if (r.status === 'completed') break;
-    if (['requires_action', 'failed', 'cancelled', 'expired'].includes(r.status)) {
+    if (['failed', 'expired', 'cancelled'].includes(r.status)) {
       throw new Error(`Run status: ${r.status}`);
     }
     if (Date.now() - started > timeoutMs) {
       throw new Error('Run timeout');
     }
-    await new Promise(res => setTimeout(res, 800));
+    await wait(800);
   }
 
-  // 5) Leer mensajes
+  // 5) Leer mensajes (el último del assistant)
   const messages = await client.beta.threads.messages.list(threadId, { order: 'desc', limit: 10 });
   let text = '';
   for (const m of messages.data) {
+    if (m.role !== 'assistant') continue;
     for (const part of (m.content || [])) {
       if (part.type === 'text' && part.text?.value) {
         text = part.text.value;
@@ -177,7 +175,7 @@ async function runAssistant(userContent, timeoutMs = 60000) {
   }
   if (!text) throw new Error('Assistant no devolvió texto');
 
-  // 6) Parsear JSON
+  // 6) Parsear JSON (tolerante a fences)
   try {
     return JSON.parse(text);
   } catch {
@@ -187,13 +185,13 @@ async function runAssistant(userContent, timeoutMs = 60000) {
   }
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Ruta principal: SIEMPRE OpenAI Assistant
-   ────────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────
+   Ruta principal
+   ───────────────────────────────────────────────────────────── */
 app.post('/api/simulations/run', async (req, res) => {
   try {
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ success: false, error: 'OPENAI_API_KEY no configurada en el servidor.' });
+      return res.status(500).json({ success: false, error: 'OPENAI_API_KEY no configurada.' });
     }
 
     const input = normalizePayload(req.body);
@@ -209,14 +207,12 @@ app.post('/api/simulations/run', async (req, res) => {
       questions: input.questions
     };
 
-    // Llamamos al Assistant configurado en la plataforma
     const assistantRaw = await runAssistant(userContent);
 
     if (!assistantRaw || !Array.isArray(assistantRaw.results)) {
       return res.status(502).json({ success: false, error: 'Respuesta inválida del Assistant (sin results).' });
     }
 
-    // Normalizamos salida (enteros, [0..100], y suma=100 si corresponde)
     const normalizedResults = assistantRaw.results.map((r, i) => {
       const q = input.questions[i] || {};
       let answers = Array.isArray(r.answers)
@@ -248,9 +244,9 @@ app.post('/api/simulations/run', async (req, res) => {
   }
 });
 
-/* ──────────────────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
    Start
-   ────────────────────────────────────────────────────────────────────────── */
+   ───────────────────────────────────────────────────────────── */
 app.listen(PORT, () => {
   console.log(`🚀 API Nalu corriendo en puerto ${PORT}`);
 });
