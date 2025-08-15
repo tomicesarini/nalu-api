@@ -127,34 +127,34 @@ function normalizePayload(body) {
 async function runAssistant(userContent, timeoutMs = 60000) {
   // 1) Crear thread
   const thread = await client.beta.threads.create();
+  const threadId = thread?.id;
 
-  // Guardas defensivas por si algo raro pasa
-  if (!thread?.id || typeof thread.id !== 'string') {
-    throw new Error('No se pudo crear el thread correctamente.');
+  if (!threadId || typeof threadId !== 'string') {
+    throw new Error(`No se pudo obtener thread.id, valor: ${threadId}`);
   }
 
-  // 2) Mandar mensaje de usuario (JSON compacto)
-  await client.beta.threads.messages.create(thread.id, {
+  // 2) Mandar mensaje
+  await client.beta.threads.messages.create(threadId, {
     role: 'user',
     content: JSON.stringify(userContent),
   });
 
-  // 3) Crear run con tu Assistant
-  const run = await client.beta.threads.runs.create(thread.id, {
+  // 3) Crear run
+  const run = await client.beta.threads.runs.create(threadId, {
     assistant_id: ASSISTANT_ID,
   });
+
+  const runId = run?.id;
+  if (!runId || typeof runId !== 'string') {
+    throw new Error(`No se pudo obtener run.id, valor: ${runId}`);
+  }
 
   // 4) Poll hasta completar o timeout
   const started = Date.now();
   while (true) {
-    const r = await client.beta.threads.runs.retrieve(thread.id, run.id);
+    const r = await client.beta.threads.runs.retrieve(threadId, runId);
     if (r.status === 'completed') break;
-    if (
-      r.status === 'requires_action' ||
-      r.status === 'failed' ||
-      r.status === 'cancelled' ||
-      r.status === 'expired'
-    ) {
+    if (['requires_action', 'failed', 'cancelled', 'expired'].includes(r.status)) {
       throw new Error(`Run status: ${r.status}`);
     }
     if (Date.now() - started > timeoutMs) {
@@ -163,8 +163,8 @@ async function runAssistant(userContent, timeoutMs = 60000) {
     await new Promise(res => setTimeout(res, 800));
   }
 
-  // 5) Leer últimos mensajes del thread
-  const messages = await client.beta.threads.messages.list(thread.id, { order: 'desc', limit: 10 });
+  // 5) Leer mensajes
+  const messages = await client.beta.threads.messages.list(threadId, { order: 'desc', limit: 10 });
   let text = '';
   for (const m of messages.data) {
     for (const part of (m.content || [])) {
