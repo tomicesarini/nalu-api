@@ -1,4 +1,4 @@
-// index.js — Nalu API (OpenAI, razonamiento doble + validador)
+// index.js — Nalu API (OpenAI Assistants)
 
 const express = require('express');
 const cors = require('cors');
@@ -7,7 +7,9 @@ const OpenAI = require('openai');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ── CORS (tus dominios + subdominios lovable) ───────────────────────────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// CORS (tus dominios + subdominios lovable)
+// ─────────────────────────────────────────────────────────────────────────────
 const allowedOrigins = new Set([
   'https://naluinsights.lovable.app',
   'https://preview-naluinsights.lovable.app',
@@ -27,20 +29,30 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ── JSON + health ───────────────────────────────────────────────────────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// JSON + health
+// ─────────────────────────────────────────────────────────────────────────────
 app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({ ok: true, status: 'API is running', ts: new Date().toISOString() });
 });
 
-/* ── OpenAI ──────────────────────────────────────────────────────────────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenAI (usa OPENAI_API_KEY en Render)
+// ─────────────────────────────────────────────────────────────────────────────
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ── Utils de normalización ──────────────────────────────────────────────── */
+// Usa ASSISTANT_ID de env si existe; si no, tu ID fijo:
+const ASSISTANT_ID = process.env.ASSISTANT_ID || 'asst_be0LI9dHJ8Ub8HPjDqDOqPCr';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utils de normalización/validación para la salida
+// ─────────────────────────────────────────────────────────────────────────────
 const SINGLE_CHOICE_TYPES = new Set([
   'multiple-choice', 'single-choice', 'single',
   'yes-no', 'yesno', 'boolean', 'scale', 'rating', 'likert'
 ]);
+
 const clampInt = (n, min, max) => {
   n = Math.round(Number(n) || 0);
   if (n < min) n = min;
@@ -48,19 +60,7 @@ const clampInt = (n, min, max) => {
   return n;
 };
 const sum = arr => arr.reduce((s, x) => s + (Number(x) || 0), 0);
-const allMultiplesOf10 = answers =>
-  Array.isArray(answers) && answers.length > 0 && answers.every(a => a.percentage % 10 === 0);
-const tooFlat = answers => {
-  if (!Array.isArray(answers) || answers.length < 3) return false;
-  const vals = answers.map(a => a.percentage).sort((a, b) => a - b);
-  return (vals[vals.length - 1] - vals[0]) <= 5;
-};
-const isSingleChoice = q => {
-  const t = (q?.type || '').toLowerCase();
-  if (SINGLE_CHOICE_TYPES.has(t)) return true;
-  if (Array.isArray(q?.options) && q.options.length > 0 && t !== 'multi-select') return true;
-  return false;
-};
+
 function normalizePercentagesTo100(answers) {
   if (!Array.isArray(answers) || answers.length === 0) return answers;
   let clamped = answers.map(a => ({
@@ -70,8 +70,7 @@ function normalizePercentagesTo100(answers) {
   let total = sum(clamped.map(a => a.percentage));
   if (total === 100) return clamped;
   if (total <= 0) {
-    clamped = clamped.map((a, i) => ({ ...a, percentage: i === 0 ? 100 : 0 }));
-    return clamped;
+    return clamped.map((a, i) => ({ ...a, percentage: i === 0 ? 100 : 0 }));
   }
   let scaled = clamped.map(a => ({
     ...a,
@@ -82,10 +81,21 @@ function normalizePercentagesTo100(answers) {
   return scaled;
 }
 
-/* ── Normalización de payload de entrada ─────────────────────────────────── */
+function isSingleChoice(q) {
+  const t = (q?.type || '').toLowerCase();
+  if (SINGLE_CHOICE_TYPES.has(t)) return true;
+  // si hay opciones y no es multi-select, lo tratamos como single
+  if (Array.isArray(q?.options) && q.options.length > 0 && t !== 'multi-select') return true;
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Normalización de payload de ENTRADA (lo que nos manda Lovable)
+// ─────────────────────────────────────────────────────────────────────────────
 function normalizePayload(body) {
   const type = (body?.type || '').toString().toLowerCase();
   const questions = Array.isArray(body?.questions) ? body.questions : [];
+
   const normQuestions = questions.map(q => {
     const base = {
       question: (q?.question || '').toString(),
@@ -103,6 +113,7 @@ function normalizePayload(body) {
     }
     return base;
   });
+
   return {
     type: type === 'entrevista' ? 'entrevista' : 'encuesta',
     audience: body?.audience || {},
@@ -112,117 +123,80 @@ function normalizePayload(body) {
   };
 }
 
-/* ── Prompts (generalistas, sin reglas por caso) ─────────────────────────── */
-function systemPrompt() {
-  return `
-Eres un simulador profesional de resultados de encuestas para investigación de mercados.
-Tu objetivo: estimar cómo respondería un público real, dados su target/psicografía y el contexto.
+// ─────────────────────────────────────────────────────────────────────────────
+// Llamado al Assistant (Threads + Runs) y parseo de su respuesta JSON
+// ─────────────────────────────────────────────────────────────────────────────
+async function runAssistant(userContent, timeoutMs = 45000) {
+  // 1) Crear thread
+  const thread = await client.beta.threads.create();
 
-Cómo trabajas (interno, sin imprimir tu razonamiento):
-- Identificas el tipo de pregunta (elección única / multi-select / abierta) y entiendes las opciones.
-- Lees el target/psicográficos para inferir afinidades, sesgos, nivel de exposición, demografía y contexto cultural/regional.
-- Consideras el contexto actual (tendencias, disponibilidad, precios, reputación, timing).
-- Propones una distribución realista, verosímil y explicable para ese público.
-- Te auto-verificas: ¿suma correcta?, ¿números plausibles (evita patrones artificiales)? ¿coherencia con el target?
+  // 2) Mandar mensaje de usuario (nuestro JSON compacto)
+  await client.beta.threads.messages.create(thread.id, {
+    role: 'user',
+    content: JSON.stringify(userContent),
+  });
 
-Salida (SOLO JSON válido):
-{
-  "success": true,
-  "status": "completed",
-  "results": [
-    {
-      "question": "texto",
-      "answers": [
-        { "text": "opción", "percentage": 0-100 }
-      ],
-      "rationale": "1–2 frases: por qué esa distribución (menciona target/psicografía y contexto)"
+  // 3) Crear run con tu Assistant
+  const run = await client.beta.threads.runs.create(thread.id, {
+    assistant_id: ASSISTANT_ID,
+    // Podés forzar formato JSON por seguridad:
+    // instructions: "Devuelve SOLO JSON válido."
+  });
+
+  // 4) Poll simple hasta completar o timeout
+  const started = Date.now();
+  while (true) {
+    const r = await client.beta.threads.runs.retrieve(thread.id, run.id);
+    if (r.status === 'completed') break;
+    if (r.status === 'requires_action' || r.status === 'failed' || r.status === 'cancelled' || r.status === 'expired') {
+      throw new Error(`Run status: ${r.status}`);
     }
-  ]
-}
-
-Reglas:
-- En **elección única** (multiple-choice, yes-no, escala/likert/rating) la suma es **exactamente 100**.
-- Evita patrones artificiales (p.ej., todos múltiplos de 5 o 10) salvo que haya una razón contundente.
-- Si no hay options (abierta), sintetiza 2–5 alternativas plausibles con porcentajes que sumen 100.
-- No escribas nada fuera del JSON. Revisa consistencia antes de responder.
-`;
-}
-
-function criticPrompt() {
-  return `
-Eres un auditor de calidad de simulaciones de encuestas. Recibirás:
-- "userContent": contexto de la simulación (tipo, audience, psicográficos, preguntas)
-- "draft": salida en formato { success, status, results[] }
-
-Tareas:
-1) Evaluar coherencia con el target/psicográficos y realismo de la distribución.
-2) Corregir fallos: sumas≠100 en single-choice, números artificiales, opciones incoherentes, racionales vacíos.
-3) Mantener el MISMO esquema y devolver SOLO JSON corregido. Sin texto fuera del JSON.
-
-Si el borrador ya es correcto, devuélvelo igual (validado).
-`;
-}
-
-/* ── Scoring y normalización de un candidato ─────────────────────────────── */
-function scoreCandidate(parsed, input) {
-  if (!parsed || !Array.isArray(parsed.results) || parsed.results.length !== input.questions.length) return -1;
-  let score = 100;
-  for (let i = 0; i < parsed.results.length; i++) {
-    const r = parsed.results[i];
-    const q = input.questions[i];
-    if (!r || !Array.isArray(r.answers) || r.answers.length === 0) return -1;
-
-    for (const a of r.answers) {
-      const p = Number(a?.percentage ?? -1);
-      if (isNaN(p) || p < 0 || p > 100) score -= 25;
+    if (Date.now() - started > timeoutMs) {
+      throw new Error('Run timeout');
     }
-    if (isSingleChoice(q)) {
-      const total = sum(r.answers.map(a => a.percentage));
-      const deviation = Math.abs(100 - total);
-      if (deviation > 2) score -= Math.min(35, deviation);
-    }
-    if (allMultiplesOf10(r.answers)) score -= 12;
-    if (tooFlat(r.answers)) score -= 10;
-    if (typeof r.rationale === 'string' && r.rationale.trim().length > 0) score += 3;
+    await new Promise(res => setTimeout(res, 800));
   }
-  return score;
-}
 
-function coerceAndNormalize(parsed, input) {
-  const out = [];
-  for (let i = 0; i < parsed.results.length; i++) {
-    const r = parsed.results[i];
-    const q = input.questions[i];
-    let answers = Array.isArray(r.answers)
-      ? r.answers.map(a => ({
-          text: (a?.text ?? '').toString(),
-          percentage: clampInt(a?.percentage ?? 0, 0, 100),
-        }))
-      : [];
-    if (isSingleChoice(q)) {
-      answers = normalizePercentagesTo100(answers);
-      if (allMultiplesOf10(answers) && answers.length >= 2) {
-        answers[0].percentage = clampInt(answers[0].percentage + 1, 0, 100);
-        answers[answers.length - 1].percentage = clampInt(answers[answers.length - 1].percentage - 1, 0, 100);
-        answers = normalizePercentagesTo100(answers);
+  // 5) Leer últimos mensajes del thread
+  const messages = await client.beta.threads.messages.list(thread.id, { order: 'desc', limit: 10 });
+  // Encontrar el primer contenido de texto
+  let text = '';
+  for (const m of messages.data) {
+    const parts = m.content || [];
+    for (const p of parts) {
+      if (p.type === 'text' && p.text?.value) {
+        text = p.text.value;
+        break;
       }
     }
-    out.push({
-      question: r.question || q.question || `Pregunta ${i + 1}`,
-      answers,
-      rationale: (r.rationale || '').toString().slice(0, 300),
-    });
+    if (text) break;
   }
-  return out;
+  if (!text) throw new Error('Assistant no devolvió texto');
+
+  // 6) Intentar parsear JSON
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Si vino code-fenced o con ruido, hacemos un fallback suave
+    const match = text.match(/\{[\s\S]*\}$/);
+    if (match) {
+      parsed = JSON.parse(match[0]);
+    } else {
+      throw new Error('Respuesta del Assistant no es JSON válido');
+    }
+  }
+  return parsed;
 }
 
-/* ── Ruta principal: siempre OpenAI (borrador n>1 + auditor) ─────────────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// Ruta principal: SIEMPRE OpenAI Assistant
+// ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/simulations/run', async (req, res) => {
   try {
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ success: false, error: 'OPENAI_API_KEY no configurada en el servidor.' });
     }
-
     const input = normalizePayload(req.body);
     if (!input.questions || input.questions.length === 0) {
       return res.status(400).json({ success: false, error: 'Faltan preguntas.' });
@@ -236,85 +210,50 @@ app.post('/api/simulations/run', async (req, res) => {
       questions: input.questions
     };
 
-    // 1) Borradores (n candidatos) — “pensar” primero
-    const drafts = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0.25,
-      top_p: 0.9,
-      n: 4, // más candidatos = más pensamiento diverso
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: systemPrompt() },
-        { role: 'user', content: JSON.stringify(userContent) }
-      ]
+    // Llamamos a TU Assistant ya configurado en la plataforma
+    const assistantRaw = await runAssistant(userContent);
+
+    if (!assistantRaw || !Array.isArray(assistantRaw.results)) {
+      return res.status(502).json({ success: false, error: 'Respuesta inválida del Assistant (sin results).' });
+    }
+
+    // Normalizamos salida: enteros, [0..100], y suma=100 si corresponde
+    const normalizedResults = assistantRaw.results.map((r, i) => {
+      const q = input.questions[i] || {};
+      let answers = Array.isArray(r.answers)
+        ? r.answers.map(a => ({
+            text: (a?.text ?? '').toString(),
+            percentage: clampInt(a?.percentage ?? 0, 0, 100),
+          }))
+        : [];
+      if (isSingleChoice(q)) {
+        answers = normalizePercentagesTo100(answers);
+      }
+      return {
+        question: r.question || q.question || `Pregunta ${i + 1}`,
+        answers,
+        rationale: (r.rationale || '').toString().slice(0, 400),
+      };
     });
-
-    const candidates = (drafts.choices || [])
-      .map(c => {
-        try { return JSON.parse(c?.message?.content || '{}'); } catch { return null; }
-      })
-      .filter(Boolean);
-
-    if (candidates.length === 0) {
-      return res.status(502).json({ success: false, error: 'Respuesta inválida del modelo (sin candidatos).' });
-    }
-
-    // Elegimos el mejor borrador según heurística de calidad
-    let best = null, bestScore = -Infinity;
-    for (const cand of candidates) {
-      const sc = scoreCandidate(cand, input);
-      if (sc > bestScore) { bestScore = sc; best = cand; }
-    }
-    if (!best || !Array.isArray(best.results)) {
-      return res.status(502).json({ success: false, error: 'Borrador sin resultados.' });
-    }
-
-    // 2) Auditor interno (self-critique): valida y corrige si hace falta
-    const audited = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0.2, // aún más estable en la auditoría
-      top_p: 0.9,
-      n: 1,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: criticPrompt() },
-        { role: 'user', content: JSON.stringify({ userContent, draft: best }) }
-      ]
-    });
-
-    let finalParsed;
-    try {
-      finalParsed = JSON.parse(audited.choices?.[0]?.message?.content || '{}');
-    } catch {
-      finalParsed = best; // si el auditor falla en JSON, usamos el mejor borrador
-    }
-    if (!finalParsed || !Array.isArray(finalParsed.results)) {
-      finalParsed = best;
-    }
-
-    const normalizedResults = coerceAndNormalize(finalParsed, input);
 
     return res.json({
       success: true,
-      source: 'openai',
-      usage: {
-        prompt_tokens: (drafts.usage?.prompt_tokens || 0) + (audited.usage?.prompt_tokens || 0),
-        completion_tokens: (drafts.usage?.completion_tokens || 0) + (audited.usage?.completion_tokens || 0),
-        total_tokens: (drafts.usage?.total_tokens || 0) + (audited.usage?.total_tokens || 0),
-      },
+      source: 'assistant',
       simulationId: `sim_${Date.now()}`,
-      status: finalParsed.status || 'completed',
+      status: assistantRaw.status || 'completed',
       estimatedTime: 'unos segundos',
       results: normalizedResults
     });
 
   } catch (err) {
     console.error('Error /api/simulations/run:', err);
-    return res.status(500).json({ success: false, error: 'Error interno al simular con OpenAI.' });
+    return res.status(500).json({ success: false, error: 'Error interno al simular con OpenAI Assistant.' });
   }
 });
 
-/* ── Start ───────────────────────────────────────────────────────────────── */
+// ─────────────────────────────────────────────────────────────────────────────
+// Start
+// ─────────────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 API Nalu corriendo en puerto ${PORT}`);
 });
