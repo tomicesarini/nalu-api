@@ -1,4 +1,4 @@
-// index.js — Nalu API (OpenAI Assistants)
+// index.js — Nalu API (OpenAI Assistants, threads+runs + JSON estricto)
 
 const express = require('express');
 const cors = require('cors');
@@ -126,7 +126,7 @@ function normalizePayload(body) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Llamado al Assistant (Threads + Runs) y parseo de su respuesta JSON
 // ─────────────────────────────────────────────────────────────────────────────
-async function runAssistant(userContent, timeoutMs = 45000) {
+async function runAssistant(userContent, timeoutMs = 60000) {
   // 1) Crear thread
   const thread = await client.beta.threads.create();
 
@@ -136,11 +136,11 @@ async function runAssistant(userContent, timeoutMs = 45000) {
     content: JSON.stringify(userContent),
   });
 
-  // 3) Crear run con tu Assistant
+  // 3) Crear run con tu Assistant (forzamos JSON y sin herramientas)
   const run = await client.beta.threads.runs.create(thread.id, {
     assistant_id: ASSISTANT_ID,
-    // Podés forzar formato JSON por seguridad:
-    // instructions: "Devuelve SOLO JSON válido."
+    instructions: 'Devuelve SOLO JSON válido con el esquema acordado. No agregues texto fuera del JSON.',
+    tool_choice: 'none',
   });
 
   // 4) Poll simple hasta completar o timeout
@@ -148,17 +148,16 @@ async function runAssistant(userContent, timeoutMs = 45000) {
   while (true) {
     const r = await client.beta.threads.runs.retrieve(thread.id, run.id);
     if (r.status === 'completed') break;
-    if (r.status === 'requires_action' || r.status === 'failed' || r.status === 'cancelled' || r.status === 'expired') {
+    if (['requires_action', 'failed', 'cancelled', 'expired'].includes(r.status)) {
       throw new Error(`Run status: ${r.status}`);
     }
-    if (Date.now() - started > timeoutMs) {
-      throw new Error('Run timeout');
-    }
+    if (Date.now() - started > timeoutMs) throw new Error('Run timeout');
     await new Promise(res => setTimeout(res, 800));
   }
 
   // 5) Leer últimos mensajes del thread
   const messages = await client.beta.threads.messages.list(thread.id, { order: 'desc', limit: 10 });
+
   // Encontrar el primer contenido de texto
   let text = '';
   for (const m of messages.data) {
