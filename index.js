@@ -1,4 +1,4 @@
-// src/index.js — Nalu API (sin fallback, errores claros, retrieve fijo)
+// src/index.js — Nalu API (encuestas + entrevistas)
 
 const express = require('express');
 const cors = require('cors');
@@ -112,8 +112,8 @@ function normalizePayload(body) {
   };
 }
 
-// Prompt para el assistant (obliga JSON puro)
-function buildUserText(input) {
+// Prompt para encuestas
+function buildSurveyPrompt(input) {
   return [
     'Eres un analista que simula resultados de encuestas.',
     'Devuelve SOLO un JSON válido, sin texto extra, con este formato exacto:',
@@ -127,6 +127,24 @@ function buildUserText(input) {
   ].join('\n');
 }
 
+// Prompt para entrevistas
+function buildInterviewPrompt(input) {
+  return [
+    'Eres un entrevistador virtual que genera respuestas textuales auténticas e individuales.',
+    `Debes generar EXACTAMENTE ${input.responsesToSimulate} respuestas únicas para cada pregunta.`,
+    'Cada respuesta debe ser un texto completo (2-3 oraciones), personal y realista.',
+    'Varía el tono y la perspectiva entre respuestas.',
+    'Refleja la demografía y psicografía de la audiencia.',
+    '',
+    'Formato de salida (SOLO JSON válido):',
+    '{"status":"completed","results":[{"question":"...","answers":[{"text":"respuesta 1","type":"text_response"}, {"text":"respuesta 2","type":"text_response"}]}]}',
+    '',
+    `Audiencia: ${JSON.stringify(input.audience)}`,
+    `Psicográficos: ${JSON.stringify(input.psychographics)}`,
+    `Preguntas: ${JSON.stringify(input.questions)}`
+  ].join('\n');
+}
+
 // Llamado al Assistant (Threads + Runs)
 async function runAssistant(input, timeoutMs = 60_000) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY ausente');
@@ -136,9 +154,13 @@ async function runAssistant(input, timeoutMs = 60_000) {
   const threadId = thread?.id;
   if (!threadId) throw new Error('No llegó threadId');
 
+  const prompt = input.type === 'entrevista'
+    ? buildInterviewPrompt(input)
+    : buildSurveyPrompt(input);
+
   await client.beta.threads.messages.create(threadId, {
     role: 'user',
-    content: buildUserText(input),
+    content: prompt,
   });
 
   const run = await client.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
@@ -205,6 +227,18 @@ app.post('/api/simulations/run', async (req, res) => {
 
     const results = assistant.results.map((r, i) => {
       const q = input.questions[i] || {};
+
+      // Flujo de ENTREVISTA
+      if (input.type === 'entrevista') {
+        return {
+          question: r.question || q.question || `Pregunta ${i + 1}`,
+          answers: Array.isArray(r.answers)
+            ? r.answers.map(a => ({ text: (a?.text ?? '').toString(), type: 'text_response' }))
+            : [],
+        };
+      }
+
+      // Flujo de ENCUESTA (igual que antes)
       let answers = Array.isArray(r.answers)
         ? r.answers.map(a => ({
             text: (a?.text ?? '').toString(),
@@ -228,7 +262,6 @@ app.post('/api/simulations/run', async (req, res) => {
     });
 
   } catch (err) {
-    // devolvemos el motivo real
     console.error('Error /api/simulations/run:', err);
     const message = err?.message || 'Error desconocido';
     return res.status(500).json({
