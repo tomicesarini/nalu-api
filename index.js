@@ -274,5 +274,5 @@ app.post('/api/simulations/run', async (req, res) => {
 
 // Start
 app.listen(PORT, () => {
-  console.log(`🚀 API Nalu corriendo en puerto ${PORT}`);
+  console.log(`🚀 API Nalu corriendo en puerto ${PORT} AMARILLO`);
 });
