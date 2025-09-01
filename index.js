@@ -103,22 +103,30 @@ function normalizePayload(body) {
     return base;
   });
 
+  // ⚠️ Cambios SOLO para entrevistas: limitar [1..5]
+  let responses = Number(body?.responsesToSimulate || 100);
+  if (type === 'entrevista') {
+    if (!Number.isFinite(responses)) responses = 1;
+    responses = Math.min(5, Math.max(1, Math.round(responses)));
+  }
+
   return {
     type: type === 'entrevista' ? 'entrevista' : 'encuesta',
     audience: body?.audience || {},
     psychographics: body?.psychographics || {},
-    responsesToSimulate: Number(body?.responsesToSimulate || 100),
+    responsesToSimulate: responses,
     questions: normQuestions,
   };
 }
 
-// Prompt para encuestas
+// Prompt para encuestas (igual espíritu que tenías)
 function buildSurveyPrompt(input) {
   return [
-    'Eres un analista que simula resultados de encuestas.',
+    'Eres un simulador de resultados de encuestas.',
     'Devuelve SOLO un JSON válido, sin texto extra, con este formato exacto:',
-    '{"status":"completed","results":[{"question":"...","answers":[{"text":"...","percentage":0-100}, ...], "rationale":"opcional breve"}]}',
+    '{"status":"completed","results":[{"question":"...","answers":[{"text":"...","percentage":0-100}], "rationale":"opcional breve"}]}',
     'Las sumas de "percentage" en cada pregunta deben ser EXACTAMENTE 100.',
+    'No redondees por conveniencia ni uses múltiplos de 5 por estética; usa los valores más probables.',
     '',
     `Contexto del público: ${JSON.stringify(input.audience)}`,
     `Psicográficos: ${JSON.stringify(input.psychographics)}`,
@@ -127,19 +135,18 @@ function buildSurveyPrompt(input) {
   ].join('\n');
 }
 
-// Prompt para entrevistas
+// Prompt para entrevistas (nuevo)
 function buildInterviewPrompt(input) {
   return [
     'Eres un entrevistador virtual que genera respuestas textuales auténticas e individuales.',
-    `Debes generar EXACTAMENTE ${input.responsesToSimulate} respuestas únicas para cada pregunta.`,
-    'Cada respuesta debe ser un texto completo (2-3 oraciones), personal y realista.',
-    'Varía el tono y la perspectiva entre respuestas.',
-    'Refleja la demografía y psicografía de la audiencia.',
+    `Para CADA pregunta, genera EXACTAMENTE ${input.responsesToSimulate} respuestas únicas.`,
+    'Cada respuesta debe ser un texto completo (2–3 oraciones), natural, personal y realista, como hablaría una persona típica de la audiencia.',
+    'No generes porcentajes ni opciones múltiples. Sólo respuestas de texto.',
     '',
-    'Formato de salida (SOLO JSON válido):',
-    '{"status":"completed","results":[{"question":"...","answers":[{"text":"respuesta 1","type":"text_response"}, {"text":"respuesta 2","type":"text_response"}]}]}',
+    'Formato de salida (SOLO JSON válido, sin texto extra):',
+    '{"status":"completed","results":[{"question":"...","answers":[{"text":"respuesta 1"}, {"text":"respuesta 2"}]}]}',
     '',
-    `Audiencia: ${JSON.stringify(input.audience)}`,
+    `Audiencia (usa este contexto): ${JSON.stringify(input.audience)}`,
     `Psicográficos: ${JSON.stringify(input.psychographics)}`,
     `Preguntas: ${JSON.stringify(input.questions)}`
   ].join('\n');
@@ -203,7 +210,7 @@ async function runAssistant(input, timeoutMs = 60_000) {
   let parsed;
   try {
     parsed = JSON.parse(cleaned);
-  } catch (e) {
+  } catch {
     const match = cleaned.match(/\{[\s\S]*\}$/);
     if (!match) throw new Error('Respuesta del Assistant no es JSON válido');
     parsed = JSON.parse(match[0]);
@@ -228,17 +235,23 @@ app.post('/api/simulations/run', async (req, res) => {
     const results = assistant.results.map((r, i) => {
       const q = input.questions[i] || {};
 
-      // Flujo de ENTREVISTA
+      // ENTREVISTA: sólo texto y asegurar cantidad pedida
       if (input.type === 'entrevista') {
+        let texts = Array.isArray(r.answers)
+          ? r.answers.map(a => ({ text: (a?.text ?? '').toString() }))
+          : [];
+
+        // recortar/ajustar a la cantidad solicitada (sin inventar contenido)
+        if (texts.length > input.responsesToSimulate) {
+          texts = texts.slice(0, input.responsesToSimulate);
+        }
         return {
           question: r.question || q.question || `Pregunta ${i + 1}`,
-          answers: Array.isArray(r.answers)
-            ? r.answers.map(a => ({ text: (a?.text ?? '').toString(), type: 'text_response' }))
-            : [],
+          answers: texts,
         };
       }
 
-      // Flujo de ENCUESTA (igual que antes)
+      // ENCUESTA: igual que antes
       let answers = Array.isArray(r.answers)
         ? r.answers.map(a => ({
             text: (a?.text ?? '').toString(),
@@ -246,10 +259,11 @@ app.post('/api/simulations/run', async (req, res) => {
           }))
         : [];
       if (isSingleChoice(q)) answers = normalizePercentagesTo100(answers);
+
       return {
         question: r.question || q.question || `Pregunta ${i + 1}`,
         answers,
-        rationale: (r.rationale || '').toString().slice(0, 400),
+        rationale: (r.rationale || '').toString().trim(),
       };
     });
 
@@ -274,5 +288,5 @@ app.post('/api/simulations/run', async (req, res) => {
 
 // Start
 app.listen(PORT, () => {
-  console.log(`🚀 API Nalu corriendo en puerto ${PORT} AMARILLO`);
+  console.log(`🚀 API Nalu corriendo en puerto ${PORT} amarillook`);
 });
