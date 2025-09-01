@@ -83,12 +83,26 @@ function isSingleChoice(q) {
   return false;
 }
 
-// Normalización de entrada (desde Lovable)
+/* ============================
+   Normalización (NUEVO)
+   - Soporta:
+     • body.audience_data (demographics, psychographics, responseCount, etc.)
+     • body.form_data.questions
+     • body.form_data.contextData { audienceContext, userInsights }
+     • Compatibilidad con el formato viejo (body.audience, body.questions, responsesToSimulate)
+   ============================ */
 function normalizePayload(body) {
   const type = (body?.type || '').toString().toLowerCase();
-  const questions = Array.isArray(body?.questions) ? body.questions : [];
 
-  const normQuestions = questions.map(q => {
+  const form = body?.form_data || {};
+  const audBlock = body?.audience_data || body?.audience || {};
+
+  // Preguntas: preferimos form_data.questions si viene
+  const rawQuestions = Array.isArray(form?.questions)
+    ? form.questions
+    : (Array.isArray(body?.questions) ? body.questions : []);
+
+  const normQuestions = rawQuestions.map(q => {
     const base = {
       question: (q?.question || '').toString(),
       required: Boolean(q?.required),
@@ -103,23 +117,45 @@ function normalizePayload(body) {
     return base;
   });
 
-  // ⚠️ Cambios SOLO para entrevistas: limitar [1..5]
-  let responses = Number(body?.responsesToSimulate || 100);
+  // Demográficos / psicográficos tal cual llegan (pueden tener arrays, strings, etc.)
+  const demographics = audBlock?.demographics || {};
+  const psychographics = audBlock?.psychographics || {};
+
+  // Contexto nuevo
+  const contextData = form?.contextData || {};
+  const audienceContext = (contextData?.audienceContext || '').toString().trim();
+  const userInsights = (contextData?.userInsights || '').toString().trim();
+
+  // Cantidad de respuestas (preferimos audience_data.responseCount)
+  let responses = Number(audBlock?.responseCount ?? body?.responsesToSimulate ?? 100);
+  if (!Number.isFinite(responses) || responses <= 0) responses = 100;
   if (type === 'entrevista') {
-    if (!Number.isFinite(responses)) responses = 1;
     responses = Math.min(5, Math.max(1, Math.round(responses)));
+  } else {
+    responses = Math.round(responses);
   }
 
   return {
     type: type === 'entrevista' ? 'entrevista' : 'encuesta',
-    audience: body?.audience || {},
-    psychographics: body?.psychographics || {},
+    // Unificamos todo en "audience" para el prompt
+    audience: {
+      name: audBlock?.name || '',
+      description: audBlock?.description || '',
+      demographics,     // p.ej.: gender, ageRange, location, education, occupation, maritalStatus, employmentStatus, income[]
+      psychographics,   // p.ej.: interests[], values[], lifestyle, motivations[], personality[], politicalOpinion[], riskPerception, innovationLevel, priceSensitivity
+      context: {
+        audienceContext,
+        userInsights,
+      },
+    },
+    // compat (no es obligatorio pero no molesta)
+    psychographics,
     responsesToSimulate: responses,
     questions: normQuestions,
   };
 }
 
-// Prompt para encuestas (igual espíritu que tenías)
+// Prompt para encuestas
 function buildSurveyPrompt(input) {
   return [
     'Eres un simulador de resultados de encuestas.',
@@ -130,12 +166,15 @@ function buildSurveyPrompt(input) {
     '',
     `Contexto del público: ${JSON.stringify(input.audience)}`,
     `Psicográficos: ${JSON.stringify(input.psychographics)}`,
+    // NUEVO: contexto e insights del usuario
+    `Contexto de audiencia: ${JSON.stringify(input.audience?.context || {})}`,
+    `Nota: el usuario aporta insights previos: ${JSON.stringify(input.audience?.context?.userInsights || '')}`,
     `Respuestas a simular: ${input.responsesToSimulate}`,
     `Preguntas: ${JSON.stringify(input.questions)}`
   ].join('\n');
 }
 
-// Prompt para entrevistas (nuevo)
+// Prompt para entrevistas
 function buildInterviewPrompt(input) {
   return [
     'Eres un entrevistador virtual que genera respuestas textuales auténticas e individuales.',
@@ -148,6 +187,9 @@ function buildInterviewPrompt(input) {
     '',
     `Audiencia (usa este contexto): ${JSON.stringify(input.audience)}`,
     `Psicográficos: ${JSON.stringify(input.psychographics)}`,
+    // NUEVO: contexto e insights del usuario
+    `Contexto de audiencia: ${JSON.stringify(input.audience?.context || {})}`,
+    `Nota: el usuario aporta insights previos: ${JSON.stringify(input.audience?.context?.userInsights || '')}`,
     `Preguntas: ${JSON.stringify(input.questions)}`
   ].join('\n');
 }
