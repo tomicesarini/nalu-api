@@ -1,4 +1,4 @@
-// src/index.js — Nalu API (encuestas + entrevistas)
+// src/index.js — Nalu API (encuestas + entrevistas) — contexto reforzado + logs prompt
 
 const express = require('express');
 const cors = require('cors');
@@ -84,15 +84,11 @@ function isSingleChoice(q) {
 }
 
 /* ============================
-   Normalización (NUEVO)
-   - Soporta:
-     • body.audience_data (demographics, psychographics, responseCount, etc.)
-     • body.form_data.questions
-     • body.form_data.contextData { audienceContext, userInsights }
-     • Compatibilidad con el formato viejo (body.audience, body.questions, responsesToSimulate)
+   Normalización (AMPLIADA)
    ============================ */
 function normalizePayload(body) {
-  const type = (body?.type || '').toString().toLowerCase();
+  const typeRaw = (body?.type || body?.form_data?.type || '').toString().toLowerCase();
+  const type = typeRaw === 'entrevista' ? 'entrevista' : 'encuesta';
 
   const form = body?.form_data || {};
   const audBlock = body?.audience_data || body?.audience || {};
@@ -117,7 +113,6 @@ function normalizePayload(body) {
     return base;
   });
 
-  // Demográficos / psicográficos tal cual llegan (pueden tener arrays, strings, etc.)
   const demographics = audBlock?.demographics || {};
   const psychographics = audBlock?.psychographics || {};
 
@@ -136,60 +131,56 @@ function normalizePayload(body) {
   }
 
   return {
-    type: type === 'entrevista' ? 'entrevista' : 'encuesta',
-    // Unificamos todo en "audience" para el prompt
+    type,
     audience: {
       name: audBlock?.name || '',
       description: audBlock?.description || '',
-      demographics,     // p.ej.: gender, ageRange, location, education, occupation, maritalStatus, employmentStatus, income[]
-      psychographics,   // p.ej.: interests[], values[], lifestyle, motivations[], personality[], politicalOpinion[], riskPerception, innovationLevel, priceSensitivity
-      context: {
-        audienceContext,
-        userInsights,
-      },
+      demographics,
+      psychographics,
+      context: { audienceContext, userInsights },
     },
-    // compat (no es obligatorio pero no molesta)
-    psychographics,
+    psychographics, // compat
     responsesToSimulate: responses,
     questions: normQuestions,
   };
 }
 
-// Prompt para encuestas
+// Prompt para encuestas — reforzado para USAR el contexto sí o sí
 function buildSurveyPrompt(input) {
   return [
-    'Eres un simulador de resultados de encuestas.',
+    'Eres un simulador de resultados de encuestas para investigación de mercado.',
     'Devuelve SOLO un JSON válido, sin texto extra, con este formato exacto:',
     '{"status":"completed","results":[{"question":"...","answers":[{"text":"...","percentage":0-100}], "rationale":"opcional breve"}]}',
-    'Las sumas de "percentage" en cada pregunta deben ser EXACTAMENTE 100.',
-    'No redondees por conveniencia ni uses múltiplos de 5 por estética; usa los valores más probables.',
+    'Reglas:',
+    '- Usa ESTRICTAMENTE los datos provistos en demographics, psychographics y context. Si existen, NO declares que faltan.',
+    '- Integra explícitamente el contexto (audienceContext) y los insights del usuario (userInsights) en la lógica de la justificación.',
+    '- Si la pregunta tiene opciones, usa EXACTAMENTE esas opciones (mismo texto). No inventes ni renombres.',
+    '- Si es de elección única, los porcentajes deben sumar EXACTAMENTE 100.',
+    '- Si es multi-select, los porcentajes pueden sumar más de 100.',
+    '- No redondees por conveniencia ni uses múltiplos de 5 por estética; usa los valores más probables.',
+    '- No “premies” una opción solo porque fue preguntada: pondera con realismo según el público y el contexto.',
     '',
-    `Contexto del público: ${JSON.stringify(input.audience)}`,
-    `Psicográficos: ${JSON.stringify(input.psychographics)}`,
-    // NUEVO: contexto e insights del usuario
-    `Contexto de audiencia: ${JSON.stringify(input.audience?.context || {})}`,
-    `Nota: el usuario aporta insights previos: ${JSON.stringify(input.audience?.context?.userInsights || '')}`,
+    `Público (usar todo este contexto): ${JSON.stringify(input.audience)}`,
+    `Psicográficos (compat): ${JSON.stringify(input.psychographics)}`,
     `Respuestas a simular: ${input.responsesToSimulate}`,
     `Preguntas: ${JSON.stringify(input.questions)}`
   ].join('\n');
 }
 
-// Prompt para entrevistas
+// Prompt para entrevistas — igual enfoque
 function buildInterviewPrompt(input) {
   return [
     'Eres un entrevistador virtual que genera respuestas textuales auténticas e individuales.',
     `Para CADA pregunta, genera EXACTAMENTE ${input.responsesToSimulate} respuestas únicas.`,
     'Cada respuesta debe ser un texto completo (2–3 oraciones), natural, personal y realista, como hablaría una persona típica de la audiencia.',
     'No generes porcentajes ni opciones múltiples. Sólo respuestas de texto.',
+    'Usa ESTRICTAMENTE demographics, psychographics y context si están presentes; intégralos en el tono y el contenido.',
     '',
     'Formato de salida (SOLO JSON válido, sin texto extra):',
     '{"status":"completed","results":[{"question":"...","answers":[{"text":"respuesta 1"}, {"text":"respuesta 2"}]}]}',
     '',
-    `Audiencia (usa este contexto): ${JSON.stringify(input.audience)}`,
-    `Psicográficos: ${JSON.stringify(input.psychographics)}`,
-    // NUEVO: contexto e insights del usuario
-    `Contexto de audiencia: ${JSON.stringify(input.audience?.context || {})}`,
-    `Nota: el usuario aporta insights previos: ${JSON.stringify(input.audience?.context?.userInsights || '')}`,
+    `Público (usa este contexto): ${JSON.stringify(input.audience)}`,
+    `Psicográficos (compat): ${JSON.stringify(input.psychographics)}`,
     `Preguntas: ${JSON.stringify(input.questions)}`
   ].join('\n');
 }
@@ -199,6 +190,9 @@ async function runAssistant(input, timeoutMs = 60_000) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY ausente');
   if (!ASSISTANT_ID) throw new Error('ASSISTANT_ID ausente');
 
+  // LOG: ver exactamente qué mandamos
+  console.log('DEBUG input ->', JSON.stringify(input, null, 2));
+
   const thread = await client.beta.threads.create();
   const threadId = thread?.id;
   if (!threadId) throw new Error('No llegó threadId');
@@ -206,6 +200,9 @@ async function runAssistant(input, timeoutMs = 60_000) {
   const prompt = input.type === 'entrevista'
     ? buildInterviewPrompt(input)
     : buildSurveyPrompt(input);
+
+  // LOG: prompt (truncado)
+  console.log('DEBUG prompt ->', prompt.slice(0, 4000));
 
   await client.beta.threads.messages.create(threadId, {
     role: 'user',
@@ -277,29 +274,32 @@ app.post('/api/simulations/run', async (req, res) => {
     const results = assistant.results.map((r, i) => {
       const q = input.questions[i] || {};
 
-      // ENTREVISTA: sólo texto y asegurar cantidad pedida
+      // ENTREVISTA
       if (input.type === 'entrevista') {
         let texts = Array.isArray(r.answers)
           ? r.answers.map(a => ({ text: (a?.text ?? '').toString() }))
           : [];
-
-        // recortar/ajustar a la cantidad solicitada (sin inventar contenido)
         if (texts.length > input.responsesToSimulate) {
           texts = texts.slice(0, input.responsesToSimulate);
         }
-        return {
-          question: r.question || q.question || `Pregunta ${i + 1}`,
-          answers: texts,
-        };
+        return { question: r.question || q.question || `Pregunta ${i + 1}`, answers: texts };
       }
 
-      // ENCUESTA: igual que antes
+      // ENCUESTA
       let answers = Array.isArray(r.answers)
         ? r.answers.map(a => ({
             text: (a?.text ?? '').toString(),
             percentage: clampInt(a?.percentage ?? 0, 0, 100),
           }))
         : [];
+
+      // Filtrar opciones inventadas si hay options
+      if (Array.isArray(q?.options) && q.options.length > 0) {
+        const allowed = new Set(q.options.map(o => o.toString().trim().toLowerCase()));
+        const filtered = answers.filter(a => allowed.has(a.text.toLowerCase().trim()));
+        if (filtered.length > 0) answers = filtered;
+      }
+
       if (isSingleChoice(q)) answers = normalizePercentagesTo100(answers);
 
       return {
