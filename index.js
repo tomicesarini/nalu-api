@@ -1,21 +1,23 @@
-
-// src/index.js — Nalu API (basic + professional + entrevistas con personas sintéticas)
+// src/index.js — Nalu API (Básico + Profesional con personas sintéticas)
+// Requisitos: OPENAI_API_KEY, ASSISTANT_ID (env)
+// Run: node index.js
 
 const express = require('express');
-const cors = require('cors');
 const OpenAI = require('openai');
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
-// CORS
+/* ─────────────────────────────────────────────────────────
+   CORS sencillo (origins propios + lovable previews)
+   ───────────────────────────────────────────────────────── */
 const allowedOrigins = new Set([
   'https://naluinsights.lovable.app',
   'https://preview-naluinsights.lovable.app',
   'https://nalua.com',
   'https://www.nalua.com',
   'https://naluia.com',
-  'https://www.naluia.com',
+  'https://www.naluia.com'
 ]);
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -28,8 +30,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// JSON + Health
-app.use(express.json({ limit: '4mb' }));
+app.use(express.json({ limit: '2mb' }));
+
+/* ─────────────────────────────────────────────────────────
+   Health
+   ───────────────────────────────────────────────────────── */
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
@@ -40,74 +45,79 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// OpenAI
+/* ─────────────────────────────────────────────────────────
+   OpenAI client
+   ───────────────────────────────────────────────────────── */
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
-// ===== Utils comunes
+/* ─────────────────────────────────────────────────────────
+   Helpers (mínimos, foco en formato para la web)
+   ───────────────────────────────────────────────────────── */
 const SINGLE_CHOICE_TYPES = new Set([
   'multiple-choice','single-choice','single','yes-no','yesno','boolean','scale','rating','likert'
 ]);
-const MULTI_CHOICE_TYPES = new Set(['multi-select','checkbox','multiple-select']);
 
-const clampInt = (n, min, max) => {
+function clampInt(n, min, max) {
   n = Math.round(Number(n) || 0);
   if (n < min) n = min;
   if (n > max) n = max;
   return n;
-};
-const sum = arr => arr.reduce((s, x) => s + (Number(x) || 0), 0);
+}
 
-function isSingleChoice(q) {
-  const t = (q?.type || '').toLowerCase();
-  if (SINGLE_CHOICE_TYPES.has(t)) return true;
-  if (Array.isArray(q?.options) && q.options.length > 0 && !MULTI_CHOICE_TYPES.has(t)) return true;
-  return false;
+function sum(arr) {
+  return arr.reduce((s, x) => s + (Number(x) || 0), 0);
 }
 
 function normalizePercentagesTo100(answers) {
   if (!Array.isArray(answers) || answers.length === 0) return answers;
   const clamped = answers.map(a => ({
-    text: (a?.text ?? '').toString(),
+    text: String(a?.text ?? ''),
     percentage: clampInt(a?.percentage ?? 0, 0, 100),
   }));
   const total = sum(clamped.map(a => a.percentage));
   if (total === 100) return clamped;
-  if (total <= 0) return clamped.map((a,i)=>({ ...a, percentage: i===0?100:0 }));
-  const scaled = clamped.map(a => ({
-    ...a, percentage: Math.round((a.percentage * 100) / total),
-  }));
+  if (total <= 0) {
+    return clamped.map((a, i) => ({ ...a, percentage: i === 0 ? 100 : 0 }));
+  }
+  const scaled = clamped.map(a => ({ ...a, percentage: Math.round((a.percentage * 100) / total) }));
   const diff = 100 - sum(scaled.map(a => a.percentage));
   if (scaled[0]) scaled[0].percentage += diff;
   return scaled;
 }
 
-/* ============================
-   Normalización de payload
-   ============================ */
+function isSingleChoice(q) {
+  const t = (q?.type || '').toLowerCase();
+  if (SINGLE_CHOICE_TYPES.has(t)) return true;
+  if (Array.isArray(q?.options) && q.options.length > 0 && t !== 'multi-select') return true;
+  return false;
+}
+
+/* ─────────────────────────────────────────────────────────
+   Normalización de ENTRADA desde la web
+   ───────────────────────────────────────────────────────── */
 function normalizePayload(body) {
   const typeRaw = (body?.type || body?.form_data?.type || '').toString().toLowerCase();
   const type = typeRaw === 'entrevista' ? 'entrevista' : 'encuesta';
 
-  const form = body?.form_data || {};
   const audBlock = body?.audience_data || body?.audience || {};
-
+  const form = body?.form_data || {};
   const rawQuestions = Array.isArray(form?.questions)
     ? form.questions
     : (Array.isArray(body?.questions) ? body.questions : []);
 
   const normQuestions = rawQuestions.map(q => {
     const base = {
-      id: (q?.id || '').toString(),
-      question: (q?.question || '').toString(),
+      id: String(q?.id ?? ''),
+      question: String(q?.question ?? ''),
+      type: String(q?.type ?? '').toLowerCase(),
       required: Boolean(q?.required),
-      type: (q?.type || '').toString().toLowerCase(),
     };
     if ((base.type === 'yes-no' || base.type === 'yesno' || base.type === 'boolean') && !Array.isArray(q?.options)) {
       base.type = 'yes-no';
       base.options = ['Sí','No'];
     } else if (Array.isArray(q?.options) && q.options.length > 0) {
-      base.options = q.options.map(o => (o ?? '').toString().trim()).filter(Boolean);
+      base.options = q.options.map(o => String(o ?? '').trim()).filter(Boolean);
     } else {
       base.options = [];
     }
@@ -116,98 +126,89 @@ function normalizePayload(body) {
 
   const demographics = audBlock?.demographics || {};
   const psychographics = audBlock?.psychographics || {};
-
-  // Contexto nuevo
   const contextData = form?.contextData || {};
-  const audienceContext = (contextData?.audienceContext || '').toString().trim();
-  const userInsights = (contextData?.userInsights || '').toString().trim();
+  const audienceContext = String(contextData?.audienceContext ?? '').trim();
+  const userInsights = String(contextData?.userInsights ?? '').trim();
 
-  // Modo y cantidad
-  const surveyType = (audBlock?.surveyType || '').toString().toLowerCase(); // "basic" | "professional"
-  const mode = surveyType === 'professional' ? 'professional' : 'basic';
-
-  let responses = Number(audBlock?.responseCount ?? body?.responsesToSimulate ?? (mode==='professional'?100:0));
-  if (mode === 'professional') {
-    if (!Number.isFinite(responses)) responses = 100;
-    responses = clampInt(responses, 10, 1000); // rango acordado
-  } else {
-    responses = 0; // basic no usa cantidad
-  }
-
-  // Para entrevistas: limitar 1..5
-  if (type === 'entrevista') {
-    responses = clampInt(Number(body?.responsesToSimulate ?? 3), 1, 5);
-  }
+  const surveyType = String(audBlock?.surveyType || '').toLowerCase(); // "basic" | "professional"
+  let responses = Number(
+    audBlock?.responseCount ??
+    body?.responsesToSimulate ??
+    body?.response_count ??
+    100
+  );
+  if (!Number.isFinite(responses) || responses <= 0) responses = 100;
+  if (type === 'entrevista') responses = Math.min(5, Math.max(1, Math.round(responses)));
+  else responses = Math.round(responses);
 
   return {
-    type,                    // 'encuesta' | 'entrevista'
-    mode,                    // 'basic' | 'professional'
+    type, // encuesta | entrevista
+    mode: surveyType === 'professional' ? 'professional' : 'basic',
     responsesToSimulate: responses,
     audience: {
+      surveyType: surveyType || undefined,
       name: audBlock?.name || '',
       description: audBlock?.description || '',
       demographics,
       psychographics,
-      context: { audienceContext, userInsights },
+      context: { audienceContext, userInsights }
     },
     questions: normQuestions,
   };
 }
 
-/* ============================
-   Prompts
-   ============================ */
-function buildBasicSurveyPrompt(input) {
+/* ─────────────────────────────────────────────────────────
+   Prompts (básico y profesional)
+   ───────────────────────────────────────────────────────── */
+// Básico: IA devuelve porcentajes directamente
+function buildSurveyPromptBasic(input) {
   return [
-    'Eres un simulador de resultados de encuestas para investigación de mercado.',
-    'Devuelve SOLO JSON válido, sin texto extra, con este formato EXACTO:',
-    '{"status":"completed","results":[{"questionId":"...","question":"...","type":"multiple-choice","options":["..."],"aggregates":[{"text":"...","percentage":0-100}], "rationale":"breve"}]}',
+    'Eres un simulador de encuestas. Devuelve SOLO JSON válido.',
+    'Formato exacto:',
+    '{"status":"completed","results":[{"question":"...","answers":[{"text":"...","percentage":0-100}],"rationale":"..."}]}',
     'Reglas:',
-    '- Usa ESTRICTAMENTE demographics, psychographics y context; si existen, no digas que faltan.',
-    '- Si la pregunta trae options, usa EXACTAMENTE esos textos.',
-    '- En elección única, los porcentajes deben sumar 100.',
-    '- En multi-select, cada opción puede ser 0–100 y la suma puede superar 100.',
-    '- No “premies” una opción sólo por estar preguntada: sé realista.',
+    '- Usa estrictamente demographics, psychographics y context si existen.',
+    '- Si hay opciones, usa EXACTAMENTE esos textos; no inventes opciones.',
+    '- Si es elección única, porcentajes suman exactamente 100.',
     '',
     `Público: ${JSON.stringify(input.audience)}`,
+    `Respuestas a simular: ${input.responsesToSimulate}`,
     `Preguntas: ${JSON.stringify(input.questions)}`
   ].join('\n');
 }
 
-function buildProfessionalSurveyPrompt(input) {
+// Profesional: IA crea N personas y sus selecciones individuales
+function buildSurveyPromptProfessional(input) {
+  const n = input.responsesToSimulate;
   return [
-    'Eres un simulador que genera PERSONAS SINTÉTICAS y sus respuestas para investigación de mercado.',
-    `Debes generar EXACTAMENTE ${input.responsesToSimulate} personas sintéticas que respondan TODAS las preguntas.`,
-    'Salida: SOLO JSON válido, sin texto extra, con este formato EXACTO:',
-    '{"status":"completed","raw_respondents":[{"respondentId":"r1","answers":[{"questionId":"...","choice":"texto-opcion"},{"questionId":"...","choices":["texto-opcion","texto-opcion"]}]}], "rationales":[{"questionId":"...","rationale":"breve por qué quedó esa distribución"}]}',
-    'Reglas IMPORTANTES:',
-    '- Todas las respuestas deben usar SOLAMENTE opciones provistas en cada pregunta (texto EXACTO).',
-    '- Si la pregunta es de elección única, usa "choice". Si es multi-select, usa "choices" (array, puede estar vacío).',
-    '- Integra demographics, psychographics y context para variar respuestas de forma realista.',
-    '- No agregues campos que no estén en el esquema.',
+    'Eres un generador de “personas sintéticas” que responden encuestas. Devuelve SOLO JSON válido.',
+    'Primero genera N personas coherentes con el público y luego sus respuestas individuales.',
+    'Formato exacto:',
+    '{',
+    '  "status":"completed",',
+    '  "mode":"professional",',
+    '  "rawRespondents":[',
+    '    { "respondentId":"r0001", "answers":[ { "questionId":"...", "selected":["Texto exacto de Opción"] } ] }',
+    '  ],',
+    '  "results":[ { "question":"...", "answers":[{"text":"...","percentage":0-100}], "rationale":"..." } ]',
+    '}',
+    'Reglas:',
+    '- N = número de personas (usa exactamente N).',
+    '- Usa EXACTAMENTE los textos de opciones. No inventes opciones.',
+    '- Cada persona elige 1 opción en preguntas de elección única.',
+    '- Construye "results" agregando el conteo de rawRespondents.',
+    '- Incluye breve "rationale" por pregunta.',
     '',
+    `N (personas): ${n}`,
     `Público: ${JSON.stringify(input.audience)}`,
     `Preguntas: ${JSON.stringify(input.questions)}`
   ].join('\n');
 }
 
-function buildInterviewPrompt(input) {
-  return [
-    'Eres un entrevistador virtual que genera respuestas textuales auténticas.',
-    `Para CADA pregunta, genera EXACTAMENTE ${input.responsesToSimulate} respuestas únicas.`,
-    'Cada respuesta debe ser un texto completo (2–3 oraciones), natural y realista.',
-    'Salida: SOLO JSON válido:',
-    '{"status":"completed","results":[{"question":"...","answers":[{"text":"..."},{"text":"..."}]}]}',
-    '',
-    `Público: ${JSON.stringify(input.audience)}`,
-    `Preguntas: ${JSON.stringify(input.questions)}`
-  ].join('\n');
-}
-
-/* ============================
-   OpenAI — Helpers
-   ============================ */
-async function runAssistantWithPrompt(prompt, timeoutMs = 60_000) {
+/* ─────────────────────────────────────────────────────────
+   Llamado Assistant (Threads + Runs)
+   ───────────────────────────────────────────────────────── */
+async function runAssistant(prompt, timeoutMs = 60_000) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY ausente');
   if (!ASSISTANT_ID) throw new Error('ASSISTANT_ID ausente');
 
@@ -216,6 +217,7 @@ async function runAssistantWithPrompt(prompt, timeoutMs = 60_000) {
   if (!threadId) throw new Error('No llegó threadId');
 
   await client.beta.threads.messages.create(threadId, { role: 'user', content: prompt });
+
   const run = await client.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
   const runId = run?.id;
   if (!runId) throw new Error('No llegó runId');
@@ -233,15 +235,11 @@ async function runAssistantWithPrompt(prompt, timeoutMs = 60_000) {
   }
 
   const messages = await client.beta.threads.messages.list(threadId, { order: 'desc', limit: 10 });
-
   let text = '';
   for (const m of messages.data) {
     if (m.role !== 'assistant') continue;
     for (const p of m.content || []) {
-      if (p.type === 'text' && p.text?.value) {
-        text = p.text.value.trim();
-        break;
-      }
+      if (p.type === 'text' && p.text?.value) { text = p.text.value.trim(); break; }
     }
     if (text) break;
   }
@@ -253,225 +251,205 @@ async function runAssistantWithPrompt(prompt, timeoutMs = 60_000) {
     .replace(/```$/i, '')
     .trim();
 
-  let parsed;
   try {
-    parsed = JSON.parse(cleaned);
+    return JSON.parse(cleaned);
   } catch {
     const match = cleaned.match(/\{[\s\S]*\}$/);
     if (!match) throw new Error('Respuesta del Assistant no es JSON válido');
-    parsed = JSON.parse(match[0]);
+    return JSON.parse(match[0]);
   }
-  return parsed;
 }
 
-/* ============================
-   Agregación y validación PRO
-   ============================ */
-function aggregateFromRespondents(questions, raw) {
-  // Map preguntas por id
-  const qById = new Map(questions.map(q => [q.id, q]));
-  const n = raw.length || 0;
+/* ─────────────────────────────────────────────────────────
+   Adaptadores → formato que espera la web (Lovable)
+   ───────────────────────────────────────────────────────── */
+// Profesional: asegurar meta.n, results con questionId y answers %, y rawRespondents
+function adaptProfessional({ input, assistantPayload }) {
+  const n = Number(input.responsesToSimulate || 0);
+  const raw = Array.isArray(assistantPayload?.rawRespondents)
+    ? assistantPayload.rawRespondents
+    : Array.isArray(assistantPayload?.raw_respondents)
+      ? assistantPayload.raw_respondents
+      : [];
 
-  const results = questions.map(q => {
-    const base = {
-      questionId: q.id,
-      question: q.question,
-      type: q.type,
-      options: q.options || [],
-      aggregates: [],
-      rationale: '', // se completa más abajo si vino en rationales
-    };
-    if (!Array.isArray(q.options) || q.options.length === 0) return { ...base, aggregates: [] };
-
-    const counts = new Map(q.options.map(o => [o, 0]));
-    for (const r of raw) {
-      const ans = (r.answers || []).find(a => a.questionId === q.id);
-      if (!ans) continue;
-
-      if (isSingleChoice(q)) {
-        const choice = (ans.choice ?? '').toString();
-        if (counts.has(choice)) counts.set(choice, counts.get(choice) + 1);
-      } else {
-        const choices = Array.isArray(ans.choices) ? ans.choices : [];
-        // en multi-select cuenta 1 por opción marcada
-        const seen = new Set();
-        for (const c of choices) {
-          const key = (c ?? '').toString();
-          if (counts.has(key) && !seen.has(key)) {
-            counts.set(key, counts.get(key) + 1);
-            seen.add(key);
-          }
-        }
-      }
-    }
-
-    // a porcentajes
-    const agg = q.options.map(o => {
-      const c = counts.get(o) || 0;
-      const denom = isSingleChoice(q) ? (n || 1) : (n || 1); // porcentaje sobre total de personas
-      const pct = Math.round((c * 100) / denom);
-      return { text: o, percentage: pct };
-    });
-
-    const finalAgg = isSingleChoice(q) ? normalizePercentagesTo100(agg) : agg;
-    return { ...base, aggregates: finalAgg };
+  // Asegurar respondentId y shape simple
+  const rawRespondents = raw.map((r, i) => {
+    const rid = String(r?.respondentId || `r${String(i+1).padStart(4, '0')}`);
+    const answers = Array.isArray(r?.answers) ? r.answers.map(a => ({
+      questionId: String(a?.questionId || ''),
+      selected: Array.isArray(a?.selected) ? a.selected.map(x => String(x)) : []
+    })) : [];
+    return { respondentId: rid, answers };
   });
 
-  return results;
+  // Agregar: si la IA no devolvió "results", los calculamos desde rawRespondents
+  let results = [];
+  if (Array.isArray(assistantPayload?.results) && assistantPayload.results.length > 0) {
+    results = assistantPayload.results;
+  } else {
+    results = computeAggregatesFromRaw(input.questions, rawRespondents);
+  }
+
+  // Normalizar results → garantizar questionId, answers[{text,percentage}], rationale
+  const normalized = results.map((r, idx) => {
+    const q = input.questions[idx] || {};
+    let answers = Array.isArray(r?.answers) ? r.answers : [];
+    if (!answers.length && Array.isArray(r?.aggregates)) {
+      answers = r.aggregates.map(a => ({ text: String(a.text||''), percentage: Number(a.percentage||0) }));
+    }
+    // Filtrar opciones desconocidas
+    if (Array.isArray(q?.options) && q.options.length > 0) {
+      const set = new Set(q.options.map(o => o.toLowerCase().trim()));
+      answers = answers.filter(a => set.has(String(a.text).toLowerCase().trim()));
+    }
+    if (isSingleChoice(q)) answers = normalizePercentagesTo100(answers);
+
+    return {
+      questionId: String(r?.questionId || q?.id || `q_${idx+1}`),
+      question: String(r?.question || q?.question || `Pregunta ${idx+1}`),
+      answers,
+      rationale: String(r?.rationale || ''),
+      // opcional: options original
+      options: Array.isArray(q?.options) ? q.options : undefined
+    };
+  });
+
+  return {
+    success: true,
+    status: assistantPayload?.status || 'completed',
+    mode: 'professional',
+    meta: { n },
+    results: normalized,
+    rawRespondents
+  };
 }
 
-function filterToAllowedOptions(questions, raw) {
-  const qById = new Map(questions.map(q => [q.id, q]));
-  const clean = [];
+// Básico: garantizar questionId y answers
+function adaptBasic({ input, assistantPayload }) {
+  const rawResults = Array.isArray(assistantPayload?.results) ? assistantPayload.results : [];
+  const normalized = rawResults.map((r, idx) => {
+    const q = input.questions[idx] || {};
+    let answers = Array.isArray(r?.answers) ? r.answers : [];
+    if (!answers.length && Array.isArray(r?.aggregates)) {
+      answers = r.aggregates.map(a => ({ text: String(a.text||''), percentage: Number(a.percentage||0) }));
+    }
+    if (Array.isArray(q?.options) && q.options.length > 0) {
+      const set = new Set(q.options.map(o => o.toLowerCase().trim()));
+      answers = answers.filter(a => set.has(String(a.text).toLowerCase().trim()));
+    }
+    if (isSingleChoice(q)) answers = normalizePercentagesTo100(answers);
 
-  for (const r of raw || []) {
-    const answers = [];
-    for (const a of (r.answers || [])) {
-      const q = qById.get(a.questionId);
-      if (!q) continue;
+    return {
+      questionId: String(r?.questionId || q?.id || `q_${idx+1}`),
+      question: String(r?.question || q?.question || `Pregunta ${idx+1}`),
+      answers,
+      rationale: String(r?.rationale || '')
+    };
+  });
 
+  return {
+    success: true,
+    status: assistantPayload?.status || 'completed',
+    mode: 'basic',
+    results: normalized
+  };
+}
+
+// Genera agregados a partir de rawRespondents
+function computeAggregatesFromRaw(questions, rawRespondents) {
+  return questions.map((q, idx) => {
+    const qid = String(q?.id || `q_${idx+1}`);
+    const opts = Array.isArray(q?.options) ? q.options.map(String) : [];
+    const counts = new Map(opts.map(o => [o, 0]));
+    let total = 0;
+
+    for (const r of rawRespondents) {
+      const ans = (r.answers || []).find(a => String(a.questionId) === qid);
+      if (!ans) continue;
+      const sel = Array.isArray(ans.selected) ? ans.selected.map(String) : [];
       if (isSingleChoice(q)) {
-        const choice = (a.choice ?? '').toString().trim();
-        if (q.options.map(o=>o.toLowerCase()).includes(choice.toLowerCase())) {
-          // normalizamos al texto original exacto (case-insensitive match)
-          const exact = q.options.find(o => o.toLowerCase() === choice.toLowerCase()) || choice;
-          answers.push({ questionId: q.id, choice: exact });
+        const pick = sel[0];
+        if (pick && counts.has(pick)) {
+          counts.set(pick, counts.get(pick) + 1);
+          total += 1;
         }
       } else {
-        const choices = Array.isArray(a.choices) ? a.choices : [];
-        const allowed = new Set(q.options.map(o => o.toLowerCase()));
-        const norm = [];
-        for (const c of choices) {
-          const key = (c ?? '').toString().trim().toLowerCase();
-          if (allowed.has(key)) {
-            const exact = q.options.find(o => o.toLowerCase() === key) || c;
-            norm.push(exact);
+        // multi-select
+        let any = false;
+        for (const pick of sel) {
+          if (counts.has(pick)) {
+            counts.set(pick, counts.get(pick) + 1);
+            any = true;
           }
         }
-        answers.push({ questionId: q.id, choices: Array.from(new Set(norm)) });
+        if (any) total += 1;
       }
     }
-    clean.push({ respondentId: r.respondentId || '', answers });
-  }
-  return clean;
+
+    let answers = opts.map(o => ({
+      text: o,
+      percentage: total > 0 ? Math.round((counts.get(o) * 100) / total) : 0
+    }));
+    if (isSingleChoice(q)) answers = normalizePercentagesTo100(answers);
+
+    return {
+      questionId: qid,
+      question: String(q?.question || `Pregunta ${idx+1}`),
+      answers,
+      rationale: '' // la IA puede proveer; si no, lo dejamos vacío
+    };
+  });
 }
 
-/* ============================
-   Ruta principal
-   ============================ */
+/* ─────────────────────────────────────────────────────────
+   Endpoint principal
+   ───────────────────────────────────────────────────────── */
 app.post('/api/simulations/run', async (req, res) => {
-  const input = normalizePayload(req.body);
-
-  if (!input.questions || input.questions.length === 0) {
-    return res.status(400).json({ success: false, error: 'Faltan preguntas.' });
-  }
-
   try {
-    // ENTREVISTAS (igual)
-    if (input.type === 'entrevista') {
-      const prompt = buildInterviewPrompt(input);
-      const ai = await runAssistantWithPrompt(prompt, 90_000);
-      const results = Array.isArray(ai?.results) ? ai.results.map((r,i)=>({
-        question: r.question || input.questions[i]?.question || `Pregunta ${i+1}`,
-        answers: Array.isArray(r.answers) ? r.answers.map(a=>({ text: (a?.text ?? '').toString() })) : [],
-      })) : [];
-      return res.json({
-        success: true,
-        source: 'assistant',
-        simulationId: `sim_${Date.now()}`,
-        status: ai?.status || 'completed',
-        mode: 'interview',
-        results
-      });
+    const input = normalizePayload(req.body);
+    if (!input.questions || input.questions.length === 0) {
+      return res.status(400).json({ success: false, error: 'Faltan preguntas.' });
     }
-
-    // ENCUESTA — BASIC
-    if (input.mode === 'basic') {
-      const prompt = buildBasicSurveyPrompt(input);
-      const ai = await runAssistantWithPrompt(prompt, 90_000);
-
-      // normalizar salida
-      const results = Array.isArray(ai?.results) ? ai.results.map((r,i) => {
-        const q = input.questions[i] || input.questions.find(qq => qq.id === r.questionId) || {};
-        let aggregates = Array.isArray(r.aggregates) ? r.aggregates.map(a => ({
-          text: (a?.text ?? '').toString(),
-          percentage: clampInt(a?.percentage ?? 0, 0, 100),
-        })) : [];
-        // filtrar a opciones reales si las hay
-        if (Array.isArray(q.options) && q.options.length > 0) {
-          const allowed = new Set(q.options.map(o => o.toLowerCase()));
-          aggregates = aggregates.filter(a => allowed.has((a.text||'').toLowerCase()));
-        }
-        if (isSingleChoice(q)) aggregates = normalizePercentagesTo100(aggregates);
-
-        return {
-          questionId: q.id || r.questionId || `q_${i+1}`,
-          question: r.question || q.question || `Pregunta ${i+1}`,
-          type: q.type || r.type || 'multiple-choice',
-          options: q.options || [],
-          aggregates,
-          rationale: (r.rationale || '').toString().trim(),
-        };
-      }) : [];
-
-      return res.json({
-        success: true,
-        source: 'assistant',
-        simulationId: `sim_${Date.now()}`,
-        status: ai?.status || 'completed',
-        mode: 'basic',
-        raw_respondents: null,
-        results
-      });
-    }
-
-    // ENCUESTA — PROFESSIONAL (personas sintéticas)
     if (input.mode === 'professional') {
-      const prompt = buildProfessionalSurveyPrompt(input);
-      const ai = await runAssistantWithPrompt(prompt, 120_000);
-
-      const raw = Array.isArray(ai?.raw_respondents) ? ai.raw_respondents : [];
-      // 1) Filtrar a opciones válidas y normalizar casing a EXACTO
-      const cleaned = filterToAllowedOptions(input.questions, raw);
-      // 2) Agregar
-      const results = aggregateFromRespondents(input.questions, cleaned);
-
-      // 3) Mapear rationales por questionId si vinieron
-      const rMap = new Map();
-      if (Array.isArray(ai?.rationales)) {
-        for (const r of ai.rationales) {
-          if (r?.questionId && r?.rationale) rMap.set(r.questionId, (r.rationale || '').toString().trim());
-        }
+      // límites sanos
+      if (input.responsesToSimulate < 10 || input.responsesToSimulate > 1000) {
+        return res.status(400).json({ success: false, error: 'responseCount debe estar entre 10 y 1000.' });
       }
-      for (const r of results) {
-        if (rMap.has(r.questionId)) r.rationale = rMap.get(r.questionId);
-      }
-
-      return res.json({
-        success: true,
-        source: 'assistant',
-        simulationId: `sim_${Date.now()}`,
-        status: ai?.status || 'completed',
-        mode: 'professional',
-        raw_respondents: cleaned,   // <-- Lovable: guardar esto para análisis bivariado
-        results
-      });
     }
 
-    // fallback imposible
-    return res.status(400).json({ success:false, error:'Modo desconocido.' });
+    // Construir prompt según modo
+    const prompt = input.mode === 'professional'
+      ? buildSurveyPromptProfessional(input)
+      : buildSurveyPromptBasic(input);
+
+    // Llamar al assistant
+    const assistant = await runAssistant(prompt);
+
+    // Adaptar respuesta al formato de la web
+    const output = input.mode === 'professional'
+      ? adaptProfessional({ input, assistantPayload: assistant })
+      : adaptBasic({ input, assistantPayload: assistant });
+
+    // Validación final mínima
+    if (!output || !Array.isArray(output.results)) {
+      return res.status(502).json({ success: false, error: 'Respuesta inválida del Assistant (sin results).' });
+    }
+
+    return res.json(output);
 
   } catch (err) {
-    console.error('Error /api/simulations/run:', err?.message, err?.stack);
-    const message = err?.message || 'Error desconocido';
-    return res.status(500).json({
+    console.error('Error /api/simulations/run:', err);
+    res.status(500).json({
       success: false,
-      error: 'Error interno al simular.',
-      message
+      error: 'Error interno al simular con OpenAI Assistant.',
+      message: err?.message || 'Error desconocido'
     });
   }
 });
 
+/* ─────────────────────────────────────────────────────────
+   Start
+   ───────────────────────────────────────────────────────── */
 app.listen(PORT, () => {
-  console.log(`🚀 API Nalu corriendo en puerto ${PORT} (basic + professional listos)`);
+  console.log(`🚀 API Nalu en puerto ${PORT}`);
 });
