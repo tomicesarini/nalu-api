@@ -230,7 +230,7 @@ function buildSurveyPromptProfessional(input) {
 /* ─────────────────────────────────────────────────────────
    Llamado Assistant (Threads + Runs)
    ───────────────────────────────────────────────────────── */
-async function runAssistant(prompt, timeoutMs = 60_000) {
+async function runAssistant(prompt, timeoutMs = 1_200_000) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY ausente');
   if (!ASSISTANT_ID) throw new Error('ASSISTANT_ID ausente');
 
