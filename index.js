@@ -1,4 +1,4 @@
-// src/index.js — Nalu API (Básico + Profesional con personas sintéticas)
+// src/index.js — Nalu API (Básico + Profesional por lotes con personas sintéticas)
 // Requisitos: OPENAI_API_KEY, ASSISTANT_ID (env)
 // Run: node index.js
 
@@ -118,6 +118,38 @@ function canonChoice(qOptions, v) {
 }
 
 /* ─────────────────────────────────────────────────────────
+   Sanitizado / parseo robusto de JSON del assistant
+   ───────────────────────────────────────────────────────── */
+function sanitizeJsonString(s) {
+  return String(s || '')
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .replace(/[\u201C\u201D]/g, '"')   // comillas curvas dobles
+    .replace(/[\u2018\u2019]/g, "'")   // comillas curvas simples
+    .replace(/\u00A0/g, ' ')           // NBSP
+    .replace(/,\s*([}\]])/g, '$1');    // comas colgantes
+}
+
+async function safeParseAssistantJson(text, retryFn) {
+  let cleaned = sanitizeJsonString(text).trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const m = cleaned.match(/\{[\s\S]*\}$/);
+    if (m) {
+      try { return JSON.parse(m[0]); } catch {}
+    }
+    if (retryFn) {
+      const retry = await retryFn();
+      const cleaned2 = sanitizeJsonString(retry).trim();
+      return JSON.parse(cleaned2);
+    }
+    throw new Error('JSON inválido tras sanitizar');
+  }
+}
+
+/* ─────────────────────────────────────────────────────────
    Normalización de ENTRADA desde la web
    ───────────────────────────────────────────────────────── */
 function normalizePayload(body) {
@@ -140,7 +172,6 @@ function normalizePayload(body) {
     };
     let opts = Array.isArray(q?.options) ? q.options : [];
 
-    // Normalizaciones de tipo y opciones
     if ((qtype === 'yes-no' || qtype === 'yesno' || qtype === 'boolean') && (!opts || opts.length === 0)) {
       base.type = 'yes-no';
       opts = ['Sí','No'];
@@ -201,52 +232,37 @@ function buildSurveyPromptBasic(input) {
   ].join('\n');
 }
 
-function buildSurveyPromptProfessional(input) {
-  const n = input.responsesToSimulate;
+// Profesional por LOTES: solo raw_respondents para un rango de IDs
+function buildProfessionalBatchPrompt({ audience, questions, batchStart, batchSize }) {
   return [
-    'Eres un generador de “personas sintéticas” que responden encuestas. Devuelve SOLO JSON válido.',
-    'Primero genera N personas coherentes con el público y luego sus respuestas individuales.',
-    'Formato exacto:',
-    '{',
-    '  "status":"completed",',
-    '  "mode":"professional",',
-    '  "rawRespondents":[',
-    '    { "respondentId":"r0001", "answers":[ { "questionId":"...", "selected":["Texto exacto de Opción"] } ] }',
-    '  ],',
-    '  "rationales":[{"questionId":"...","rationale":"..."}]',
-    '}',
+    'Eres un generador de personas sintéticas para encuestas.',
+    'Devuelve SOLO JSON válido con este formato EXACTO:',
+    '{"status":"ok","raw_respondents":[{"respondentId":"r0001","answers":[{"questionId":"<ID>","selected":["<opción EXACTA>"]}]}]}',
     'Reglas:',
-    '- N = número de personas (usa exactamente N).',
-    '- Usa EXACTAMENTE los textos de opciones. No inventes opciones.',
-    '- Cada persona elige 1 opción en preguntas de elección única.',
-    '- NO devuelvas "results" agregados; nosotros los calculamos.',
+    `- Debes generar EXACTAMENTE ${batchSize} personas con IDs consecutivos empezando en r${String(batchStart).padStart(4,'0')}.`,
+    '- Usa EXCLUSIVAMENTE las opciones provistas (texto EXACTO).',
+    '- Si la pregunta es yes-no, las opciones son "Sí" y "No".',
+    '- No incluyas análisis, ni rationale, ni texto fuera del JSON.',
     '',
-    `N (personas): ${n}`,
-    `Público: ${JSON.stringify(input.audience)}`,
-    `Preguntas: ${JSON.stringify(input.questions)}`
+    `Público: ${JSON.stringify(audience)}`,
+    `Preguntas: ${JSON.stringify(questions)}`
   ].join('\n');
 }
 
 /* ─────────────────────────────────────────────────────────
-   Llamado Assistant (Threads + Runs)
+   OpenAI — ejecución texto y por lotes
    ───────────────────────────────────────────────────────── */
-async function runAssistant(prompt, timeoutMs = 1_200_000) {
+async function runAssistantText(prompt, timeoutMs) {
   if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY ausente');
   if (!ASSISTANT_ID) throw new Error('ASSISTANT_ID ausente');
 
   const thread = await client.beta.threads.create();
-  const threadId = thread?.id;
-  if (!threadId) throw new Error('No llegó threadId');
+  await client.beta.threads.messages.create(thread.id, { role: 'user', content: prompt });
 
-  await client.beta.threads.messages.create(threadId, { role: 'user', content: prompt });
-
-  const run = await client.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
-  const runId = run?.id;
-  if (!runId) throw new Error('No llegó runId');
-
+  const run = await client.beta.threads.runs.create(thread.id, { assistant_id: ASSISTANT_ID });
   const start = Date.now();
   while (true) {
-    const r = await client.beta.threads.runs.retrieve(threadId, runId);
+    const r = await client.beta.threads.runs.retrieve(thread.id, run.id);
     if (r.status === 'completed') break;
     if (['failed','cancelled','expired','requires_action'].includes(r.status)) {
       const reason = r?.last_error?.message || r.status;
@@ -256,37 +272,70 @@ async function runAssistant(prompt, timeoutMs = 1_200_000) {
     await new Promise(res => setTimeout(res, 900));
   }
 
-  const messages = await client.beta.threads.messages.list(threadId, { order: 'desc', limit: 10 });
-  let text = '';
+  const messages = await client.beta.threads.messages.list(thread.id, { order: 'desc', limit: 10 });
   for (const m of messages.data) {
     if (m.role !== 'assistant') continue;
     for (const p of m.content || []) {
-      if (p.type === 'text' && p.text?.value) { text = p.text.value.trim(); break; }
+      if (p.type === 'text' && p.text?.value) {
+        return p.text.value;
+      }
     }
-    if (text) break;
   }
-  if (!text) throw new Error('Assistant no devolvió texto');
+  throw new Error('Assistant no devolvió texto');
+}
 
-  const cleaned = text
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/```$/i, '')
-    .trim();
+// Ejecuta PRO en lotes y concatena
+async function runProfessionalInBatches({ audience, questions, totalN, batchSize = 100, baseTimeoutMs = 1_200_000 }) {
+  const batches = Math.ceil(totalN / batchSize);
+  const all = [];
+  for (let b = 0; b < batches; b++) {
+    const startIndex = b * batchSize + 1;
+    const size = Math.min(batchSize, totalN - b * batchSize);
 
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    const match = cleaned.match(/\{[\s\S]*\}$/);
-    if (!match) throw new Error('Respuesta del Assistant no es JSON válido');
-    return JSON.parse(match[0]);
+    const prompt = buildProfessionalBatchPrompt({
+      audience, questions, batchStart: startIndex, batchSize: size
+    });
+
+    // Timeout dinámico por lote (base alta + depende de tamaño y preguntas)
+    const perPersonMs = 600;     // ajustable
+    const perQuestionMs = 6000;  // ajustable
+    const timeoutMs = baseTimeoutMs + size * perPersonMs + questions.length * perQuestionMs;
+
+    const rawText = await runAssistantText(prompt, timeoutMs);
+
+    const parsed = await safeParseAssistantJson(
+      rawText,
+      async () => {
+        // Reintento: re-emite SOLO JSON válido
+        const retryPrompt = 'Repite SOLO el JSON válido anterior, sin markdown ni comentarios.';
+        const retryText = await runAssistantText(retryPrompt, 60_000);
+        return retryText;
+      }
+    );
+
+    const chunk = Array.isArray(parsed?.raw_respondents) ? parsed.raw_respondents
+                : Array.isArray(parsed?.rawRespondents) ? parsed.rawRespondents
+                : [];
+
+    const norm = chunk.map((r, i) => ({
+      respondentId: String(r?.respondentId || `r${String(startIndex + i).padStart(4,'0')}`),
+      answers: (Array.isArray(r?.answers) ? r.answers : []).map(a => ({
+        questionId: String(a?.questionId || ''),
+        selected: Array.isArray(a?.selected) ? a.selected.map(String)
+                 : Array.isArray(a?.choices) ? a.choices.map(String)
+                 : (a?.choice != null ? [String(a.choice)] : [])
+      }))
+    }));
+
+    all.push(...norm);
   }
+  return all;
 }
 
 /* ─────────────────────────────────────────────────────────
    Agregación PRO desde rawRespondents
    ───────────────────────────────────────────────────────── */
 function computeAggregatesFromRaw(questions, rawRespondents) {
-  // Canonizar opciones por pregunta
   const qList = questions.map(q => ({
     id: String(q?.id || ''),
     question: String(q?.question || ''),
@@ -301,7 +350,6 @@ function computeAggregatesFromRaw(questions, rawRespondents) {
     const counts = new Map(q.options.map(o => [o, 0]));
 
     for (const r of rawRespondents) {
-      // aceptar choice | selected | choices
       const rawAns = (r?.answers || []).find(a => String(a?.questionId) === q.id);
       if (!rawAns) continue;
 
@@ -314,7 +362,6 @@ function computeAggregatesFromRaw(questions, rawRespondents) {
         const exact = canonChoice(q.options, picks[0]);
         if (exact) counts.set(exact, counts.get(exact) + 1);
       } else {
-        // multi: contar por persona; duplicados por persona no suman extra
         const seen = new Set();
         for (const p of picks || []) {
           const exact = canonChoice(q.options, p);
@@ -326,7 +373,6 @@ function computeAggregatesFromRaw(questions, rawRespondents) {
       }
     }
 
-    // porcentajes
     let answers = q.options.map(o => ({
       text: o,
       percentage: n > 0 ? Math.round((counts.get(o) * 100) / n) : 0
@@ -345,53 +391,26 @@ function computeAggregatesFromRaw(questions, rawRespondents) {
 /* ─────────────────────────────────────────────────────────
    Adaptadores → formato web (Lovable)
    ───────────────────────────────────────────────────────── */
-function adaptProfessional({ input, assistantPayload }) {
-  const n = Number(input.responsesToSimulate || 0);
-
-  // Aceptar rawRespondents en diferentes keys y normalizar shape
-  const rawIn = Array.isArray(assistantPayload?.rawRespondents)
-    ? assistantPayload.rawRespondents
-    : Array.isArray(assistantPayload?.raw_respondents)
-      ? assistantPayload.raw_respondents
-      : [];
-
-  const rawRespondents = rawIn.map((r, i) => {
-    const rid = String(r?.respondentId || `r${String(i+1).padStart(4, '0')}`);
-    // convertir a {questionId, selected:[]}
-    const answers = Array.isArray(r?.answers) ? r.answers.map(a => {
-      const qid = String(a?.questionId || '');
-      let selected = [];
-      if (Array.isArray(a?.selected)) selected = a.selected;
-      else if (Array.isArray(a?.choices)) selected = a.choices;
-      else if (a?.choice != null) selected = [a.choice];
-      selected = selected.map(x => String(x ?? '')).filter(Boolean);
-      return { questionId: qid, selected };
-    }) : [];
-    return { respondentId: rid, answers };
-  });
-
-  // Siempre recalcular agregados desde la muestra cruda
+function adaptProfessionalOutput({ input, rawRespondents, rationales }) {
   const results = computeAggregatesFromRaw(input.questions, rawRespondents);
 
-  // Mapear racionales si vinieron
   const rMap = new Map();
-  if (Array.isArray(assistantPayload?.rationales)) {
-    for (const r of assistantPayload.rationales) {
+  if (Array.isArray(rationales)) {
+    for (const r of rationales) {
       const qid = String(r?.questionId || '');
       const txt = String(r?.rationale || '').trim();
       if (qid && txt) rMap.set(qid, txt);
     }
   }
   for (const r of results) {
-    if (rMap.has(r.questionId)) r.rationale = rMap.get(r.questionId);
-    else r.rationale = r.rationale || '';
+    r.rationale = rMap.get(r.questionId) || '';
   }
 
   return {
     success: true,
-    status: assistantPayload?.status || 'completed',
+    status: 'completed',
     mode: 'professional',
-    meta: { n },
+    meta: { n: Number(input.responsesToSimulate || 0) },
     results,
     rawRespondents
   };
@@ -445,38 +464,31 @@ app.post('/api/simulations/run', async (req, res) => {
       }
     }
 
-    // Elegir prompt
-    let prompt;
-    if (input.type === 'entrevista') {
-      // Reusamos prompt básico de texto libre (si hicieran entrevistas acá)
-      prompt = [
-        'Eres un entrevistador virtual que genera respuestas textuales auténticas.',
-        `Para CADA pregunta, genera EXACTAMENTE ${clampInt(input.responsesToSimulate || 3,1,5)} respuestas únicas.`,
-        'Cada respuesta debe ser un texto completo (2–3 oraciones), natural y realista.',
-        'Salida: SOLO JSON válido:',
-        '{"status":"completed","results":[{"question":"...","answers":[{"text":"..."},{"text":"..."}]}]}',
-        '',
-        `Público: ${JSON.stringify(input.audience)}`,
-        `Preguntas: ${JSON.stringify(input.questions)}`
-      ].join('\n');
-    } else {
-      prompt = input.mode === 'professional'
-        ? buildSurveyPromptProfessional(input)
-        : buildSurveyPromptBasic(input);
+    // ENTREVISTAS: (si las usaran aquí) se podrían tratar aparte. Mantengo solo encuestas.
+    if (input.mode === 'professional') {
+      // Ejecutar por lotes y agregar en el servidor (robusto para N grande)
+      const rawRespondents = await runProfessionalInBatches({
+        audience: input.audience,
+        questions: input.questions,
+        totalN: input.responsesToSimulate,
+        batchSize: 100,          // seguro; subible a 150 si ves estable
+        baseTimeoutMs: 1_200_000 // base alta; luego por lote se ajusta
+      });
+
+      // (Opcional: podríamos pedir racionales en un último mini-lote si querés)
+      const out = adaptProfessionalOutput({ input, rawRespondents, rationales: [] });
+      return res.json(out);
     }
 
-    // Llamar al assistant
-    const assistant = await runAssistant(prompt);
-
-    // Adaptar salida para el frontend
-    const output = (input.type !== 'entrevista' && input.mode === 'professional')
-      ? adaptProfessional({ input, assistantPayload: assistant })
-      : adaptBasic({ input, assistantPayload: assistant });
+    // MODO BÁSICO (como estaba): IA devuelve agregados y nosotros normalizamos
+    const prompt = buildSurveyPromptBasic(input);
+    const rawText = await runAssistantText(prompt, 1_200_000);
+    const assistantPayload = await safeParseAssistantJson(rawText);
+    const output = adaptBasic({ input, assistantPayload });
 
     if (!output || !Array.isArray(output.results)) {
       return res.status(502).json({ success: false, error: 'Respuesta inválida del Assistant (sin results).' });
     }
-
     return res.json(output);
 
   } catch (err) {
