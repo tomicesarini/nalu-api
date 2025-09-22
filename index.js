@@ -15,9 +15,8 @@ const allowedOrigins = new Set([
   'https://naluinsights.lovable.app',
   'https://preview-naluinsights.lovable.app',
   'https://nalua.com',
-  'https://www.nalua.com',
   'https://naluia.com',
-  'https://www.naluia.com'
+  'https://www.nalua.com'
 ]);
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -249,6 +248,22 @@ function buildProfessionalBatchPrompt({ audience, questions, batchStart, batchSi
   ].join('\n');
 }
 
+/* 🔹 NUEVO: pedir racionales sobre agregados ya calculados (payload liviano) */
+function buildRationalesPrompt(input, aggregates) {
+  return [
+    'Eres un analista de investigación de mercados.',
+    'Devuelve SOLO JSON válido con este formato EXACTO:',
+    '{"status":"ok","rationales":[{"questionId":"...","rationale":"2–3 frases, claras y concretas"}]}',
+    'Instrucciones:',
+    '- Usa la audiencia y los porcentajes agregados provistos.',
+    '- No repitas opciones ni porcentajes; sintetiza el insight (“por qué dio así”).',
+    '- Máx. 2–3 frases por pregunta, tono profesional breve.',
+    '',
+    `Audiencia: ${JSON.stringify(input.audience)}`,
+    `Agregados: ${JSON.stringify(aggregates)}`
+  ].join('\n');
+}
+
 /* ─────────────────────────────────────────────────────────
    OpenAI — ejecución texto y por lotes
    ───────────────────────────────────────────────────────── */
@@ -388,6 +403,19 @@ function computeAggregatesFromRaw(questions, rawRespondents) {
   });
 }
 
+/* 🔹 NUEVO: pedir racionales a la IA en base a agregados ya calculados */
+async function getRationalesForAggregates(input, aggregates) {
+  const prompt = buildRationalesPrompt(input, aggregates);
+  const raw = await runAssistantText(prompt, 180_000); // corto y liviano
+  const parsed = await safeParseAssistantJson(raw);
+  const rationales = Array.isArray(parsed?.rationales) ? parsed.rationales : [];
+  // normalizar shape
+  return rationales.map(r => ({
+    questionId: String(r?.questionId || ''),
+    rationale: String(r?.rationale || '').trim()
+  }));
+}
+
 /* ─────────────────────────────────────────────────────────
    Adaptadores → formato web (Lovable)
    ───────────────────────────────────────────────────────── */
@@ -466,17 +494,23 @@ app.post('/api/simulations/run', async (req, res) => {
 
     // ENTREVISTAS: (si las usaran aquí) se podrían tratar aparte. Mantengo solo encuestas.
     if (input.mode === 'professional') {
-      // Ejecutar por lotes y agregar en el servidor (robusto para N grande)
+      // 1) Ejecutar por lotes y traer TODAS las respuestas individuales
       const rawRespondents = await runProfessionalInBatches({
         audience: input.audience,
         questions: input.questions,
         totalN: input.responsesToSimulate,
-        batchSize: 100,          // seguro; subible a 150 si ves estable
-        baseTimeoutMs: 1_200_000 // base alta; luego por lote se ajusta
+        batchSize: 100,          // seguro
+        baseTimeoutMs: 1_200_000 // base alta; el per-lote se ajusta
       });
 
-      // (Opcional: podríamos pedir racionales en un último mini-lote si querés)
-      const out = adaptProfessionalOutput({ input, rawRespondents, rationales: [] });
+      // 2) Agregar localmente (porcentajes) — lo de siempre
+      const aggregates = computeAggregatesFromRaw(input.questions, rawRespondents);
+
+      // 3) Pedir racionales cortos por pregunta (payload liviano)
+      const rationales = await getRationalesForAggregates(input, aggregates);
+
+      // 4) Armar salida final con racionales
+      const out = adaptProfessionalOutput({ input, rawRespondents, rationales });
       return res.json(out);
     }
 
