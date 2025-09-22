@@ -487,8 +487,8 @@ app.post('/api/simulations/run', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Faltan preguntas.' });
     }
     if (input.type !== 'entrevista' && input.mode === 'professional') {
-      if (input.responsesToSimulate < 10 || input.responsesToSimulate > 1000) {
-        return res.status(400).json({ success: false, error: 'responseCount debe estar entre 10 y 1000.' });
+      if (input.responsesToSimulate < 1 || input.responsesToSimulate > 1000) {
+        return res.status(400).json({ success: false, error: 'responseCount debe estar entre 1 y 1000.' });
       }
     }
 
