@@ -499,7 +499,7 @@ app.post('/api/simulations/run', async (req, res) => {
         audience: input.audience,
         questions: input.questions,
         totalN: input.responsesToSimulate,
-        batchSize: 100,          // seguro
+        batchSize: 50,          // seguro
         baseTimeoutMs: 1_200_000 // base alta; el per-lote se ajusta
       });
 
