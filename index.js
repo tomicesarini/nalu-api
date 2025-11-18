@@ -6,6 +6,19 @@ const express = require('express');
 const OpenAI = require('openai');
 
 const app = express();
+// 🔐 Middleware para validar que las requests vengan desde Lovable
+function checkInternalKey(req, res, next) {
+  const clientKey = req.headers.authorization;
+
+  if (!clientKey || clientKey !== process.env.NALU_API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  next();
+}
+
+// Activo el middleware en TODAS las rutas
+app.use(checkInternalKey);
 const PORT = process.env.PORT || 3000;
 
 /* ─────────────────────────────────────────────────────────
