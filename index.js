@@ -182,6 +182,14 @@ function normalizePayload(body) {
       type: qtype,
       required: Boolean(q?.required),
     };
+    // ✅ Añadir soporte para imágenes
+if (q?.media?.url) {
+  base.media = {
+    type: "image",
+    url: String(q.media.url),
+    description: String(q.media.description || "")
+  };
+}
     let opts = Array.isArray(q?.options) ? q.options : [];
 
     if ((qtype === 'yes-no' || qtype === 'yesno' || qtype === 'boolean') && (!opts || opts.length === 0)) {
